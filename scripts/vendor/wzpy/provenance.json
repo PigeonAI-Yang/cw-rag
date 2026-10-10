@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/Leonana69/wz-python",
+  "commit": "2cfc443e0e92b4476664a256ab1e1ae6aa229cd0",
+  "license": "MIT",
+  "files": {
+    "crypto.py": "e41993e59a4ee33ff3849ec8f5678ca28f08d88029e1f857c63d28ff4454da01",
+    "properties.py": "68499ab81fa1321343ff1cfa2c179af32c6c14c11ca811bbe1b762c93121b28a",
+    "reader.py": "2549a31ba401a3e7e0588a14a40e8a02a3c1dd0c1b2f840a38242f187987cf98",
+    "wz_file.py": "54dcf8c2ff900984e34dc8db2e62650dd761f62f0d053836aed00857ff47f8eb",
+    "wz_image.py": "239bd74f94b0a6dff2e264b746390bf4965d17280a346e52fa7cf074f68b7af5",
+    "canvas.py": "2994c240f5241f8e97abc81e3d1d3597b1405f2329de177627b765f88bb8e05f",
+    "chacha20.py": "d79913b1c342875335726bfbfbf59163957b625c36d9c06d852a9d74c9cc2d09",
+    "ms_file_v2.py": "6459dff03f1b7d635dca085bedbdfe10e72d3b968d4892c20f82b63c322fe97e"
+  },
+  "local_adaptations": {
+    "ms_file_v2.py": "Header checksum, entry checksum and payload bounds verified before use; algorithm matched to WzComparerR2 Ms_FileV2.cs / Ms_ImageV2.cs. Version 4 ChaCha20, no heuristic scanner."
+  }
+}
