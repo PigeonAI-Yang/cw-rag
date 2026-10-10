@@ -106,7 +106,7 @@ For Chinese questions, rewrite the likely name or concept as English source term
 
 ## Ask Codex about a snapshot
 
-After an authorized initial build, ask Codex a question about the saved snapshot:
+After an authorized initial build, ask Codex about the saved snapshot. It leads with practical advice grounded in local results, uses familiar labels for attributes the records establish, and mentions unknown or missing details only when they could change your choice.
 
 - "15级战士能用哪些武器？比较攻击和需求属性"
 - "Where can I find Slime in my local snapshot?"
@@ -118,7 +118,7 @@ These prompts are examples and do not imply specific answers. For an existing sn
 
 Lead with a practical answer grounded in retrieved records. When character stats or equipment are unknown, state concise assumptions; ordinary advice does not require combat measurements. Use explicit descriptions, stored skill levels, and prerequisite references to explain choices while preserving their original values. Do not invent meanings for undocumented codes, `reqJob` masks, `skillType`, `job_GL`, quest stage/state codes, or expressions.
 
-When comparing equipment or item bonuses, report `incWAT` and `incPAD` as separate source fields. Do not treat them as aliases.
+Keep `incWAT` and `incPAD` distinct in the source data. In routine advice, mention their separate values only when both are present and relevant; never combine or substitute one for the other.
 
 Skill lookup uses an exact explicit level. It preserves mixed numeric and string values and reports whether the requested level exists. It does not fill missing levels or evaluate common expressions. Skill prerequisites retain their raw required-level values.
 
