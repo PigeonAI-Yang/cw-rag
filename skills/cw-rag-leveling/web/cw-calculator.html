@@ -149,12 +149,13 @@
         <tr>
           <th>排名</th><th>怪名</th><th class="num">等级</th><th class="num">血量</th>
           <th class="num">几刀</th><th class="num">经验/刀</th><th class="num">每只经验</th>
-          <th class="num">攻击力</th><th>推荐地图</th>
+          <th class="num">攻击力</th><th class="num">物防</th><th>推荐地图</th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
   </div>
+  <div id="pddwarn"></div>
   <div class="note mt8">
     <strong>排序依据是「经验/刀」</strong>：一刀秒 = 它的全部经验；两刀 = 经验除以二。
     这个数字越高，代表你每挥一刀换来的经验越多。<br>
@@ -214,11 +215,18 @@
 <div class="card">
   <h2>关于数据的说明</h2>
   <div style="font-size:13px;color:var(--dim)">
-    怪物等级、血量、经验、攻击力、刷新点数量全部来自你电脑里的 CW 客户端文件（快照构建于 2026-10-09），是真实数据。<br><br>
-    <strong>但游戏文件里没有伤害计算公式</strong>，所以「几刀」是这样估的：<br>
-    · 你填了实测伤害 → 直接用它，准确<br>
-    · 没填 → 按「(力量×4 + 敏捷) × 武器攻击 ÷ 100 × 0.8」粗估<br><br>
-    客户端里还有怪物防御、闪避等字段，但含义没有官方说明，<strong>所以计算器没有把它们算进去</strong>——我不拿没搞懂的字段编公式。<br><br>
+    怪物等级、血量、经验、攻击力、物防、刷新点数量全部来自你电脑里的 CW 客户端文件，是真实数据。<br><br>
+
+    <strong>为什么必须填「单刀伤害」：</strong><br>
+    游戏文件里<strong>没有伤害计算公式</strong>。之前的版本试过自动估算，结果估出 115 的上限，
+    而实测只有 77 —— 高估了 50%。所以现在<strong>取消了估算</strong>，没填就不出结果。<br><br>
+
+    <strong>关于「物防」这一栏：</strong><br>
+    · 物防 = 0 → 实测确认你的面板伤害可以直接套用（红蜗牛物防 0，实测 35-78 与面板 28-77 吻合）<br>
+    · 物防 &gt; 0 → 实际伤害会低于面板，但<strong>客户端没有给出换算方式</strong>，
+      所以本计算器<strong>不推算</strong>，也不把它算进刀数<br>
+    · 表里给物防不为 0 的怪都标出来了，真实刀数会比显示的更多，可以只挑物防 0 的打<br><br>
+
     装备掉落率、服务器倍率、活动加成，客户端文件里也没有。
   </div>
 </div>
@@ -249,20 +257,10 @@ function pickWeapon(lv){
   return WEAPONS.indexOf(ok[0]);
 }
 
-function estimateDamage(){
-  const str = +$('str').value || 4;
-  const dex = +$('dex').value || 4;
-  const w = WEAPONS[+$('weapon').value] || WEAPONS[0];
-  const watk = (w ? w.atk : 0) + (+$('watk').value || 0);
-  const maxDmg = (str * 4 + dex) * watk / 100;
-  return { max: Math.round(maxDmg), typical: Math.max(1, Math.round(maxDmg * 0.8)) };
-}
-
 function currentDamage(){
   const manual = +$('dmg').value || 0;
   if(manual > 0) return { dmg: manual, real: true };
-  const e = estimateDamage();
-  return { dmg: e.typical, max: e.max, real: false };
+  return { dmg: 0, real: false };
 }
 
 function armorDefense(lv){
@@ -290,13 +288,17 @@ function computeOne(lv, dmg, minNodes, maxLv, minLv){
     const hits = Math.max(1, Math.ceil(m.hp / dmg));
     out.push({ ...m, hits, eph: m.exp / hits, maps });
   }
-  out.sort((a,b)=> b.eph - a.eph);
+  // 经验/刀相同的，优先物防为 0 的（面板伤害可直接套用）
+  out.sort((a,b)=> b.eph - a.eph || (a.pdd||0) - (b.pdd||0));
   return out;
 }
 
 function compute(){
   const lv = +$('lv').value || 1;
   const { dmg, real } = currentDamage();
+  if(!real || dmg <= 0){
+    return { lv, dmg: 0, real: false, all: [], within2: [], filtered: [], relaxed: null, needsDamage: true };
+  }
   const minNodes = +$('minnodes').value;
   const maxHits = +$('maxhits').value;
   const maxLv = +$('maxlv').value || lv + 5;
@@ -320,7 +322,7 @@ function compute(){
   }
 
   return {
-    lv, dmg, real, all, relaxed,
+    lv, dmg, real, all, relaxed, needsDamage: false,
     within2: all.filter(x => x.hits <= 2),
     filtered: all.filter(x => x.hits <= maxHits),
   };
@@ -328,6 +330,15 @@ function compute(){
 
 function renderVerdict(r){
   const box = $('verdict');
+  if(r.needsDamage){
+    box.innerHTML = `<div class="badbox" style="font-size:15px">
+      <strong>请先填「单刀伤害」。</strong><br><br>
+      客户端文件里没有伤害计算公式，任何自动估算都会偏乐观（实测过一次：估 115，实际只有 77）。
+      所以这里不再估算，<strong>只按你实测的数字算</strong>。<br><br>
+      做法：进游戏打一只怪，看屏幕上跳出的数字，取个大概的平均值填进第一栏的「单刀伤害」。
+    </div>`;
+    return;
+  }
   if(!r.all.length){
     box.innerHTML = `<div class="warnbox">没有符合条件的怪。把「单张地图最少几只怪」调低，或把「怪物等级上限」调高试试。</div>`;
     return;
@@ -385,6 +396,7 @@ function renderTable(r){
       <td class="num"><strong style="color:var(--good)">${x.eph.toFixed(0)}</strong></td>
       <td class="num">${x.exp}</td>
       <td class="num">${x.atk}</td>
+      <td class="num">${x.pdd === 0 ? '<span style="color:var(--good)">0</span>' : (x.pdd == null ? '—' : x.pdd)}</td>
       <td class="mapname">${maps}</td>`;
     tb.appendChild(tr);
   });
@@ -416,23 +428,35 @@ function renderGear(lv){
     '<div style="font-size:12px;color:var(--dim);margin-top:6px">回避 = 怪打空你，直接不掉血。</div>';
 }
 
+function defenseWarning(all){
+  const risky = all.filter(x => (x.pdd || 0) > 0);
+  if(!risky.length) return '';
+  const worst = risky.slice().sort((a,b)=> (b.pdd||0)-(a.pdd||0)).slice(0,4)
+    .map(x=> `${x.name}(物防${x.pdd})`).join('、');
+  return `<div class="warnbox" style="margin-top:12px">
+    <strong>物防提醒：</strong>下列怪的物防字段不为 0，实际伤害会低于面板值 —— ${worst}。<br>
+    该字段为 0 时，你填的面板伤害可直接套用；不为 0 时，客户端没有给出换算方式，
+    <strong>本计算器不推算</strong>，所以这些怪的真实刀数会比表里更多。想避开可以用下面的「物防上限」筛选。
+  </div>`;
+}
+
 function rerender(){
   const r = compute();
-  const est = estimateDamage();
   $('kpi').innerHTML = `
-    <div><div class="k">单刀伤害</div><div class="v">${r.dmg}</div></div>
-    <div><div class="k">估算最高伤害</div><div class="v">${est.max}</div></div>
+    <div><div class="k">单刀伤害</div><div class="v">${r.real ? r.dmg : '—'}</div></div>
     <div><div class="k">估算防御</div><div class="v">${armorDefense(r.lv)}</div></div>
     <div><div class="k">候选怪种</div><div class="v">${r.all.length}</div></div>
     <div><div class="k">最高经验/刀</div><div class="v" style="color:var(--good)">${r.all[0]?r.all[0].eph.toFixed(0):'—'}</div></div>`;
 
   $('dmgnote').innerHTML = r.real
-    ? `<div class="okbox">正在用<strong>你实测的伤害 ${r.dmg}</strong>，结果准确。</div>`
-    : `<div class="note">现在是<strong>粗估伤害 ${r.dmg}</strong>（最高约 ${est.max}）。想要准确结果，把游戏里的实际伤害填进第一栏。</div>`;
+    ? `<div class="okbox">正在用<strong>你实测的伤害 ${r.dmg}</strong>，结果按这个算。</div>`
+    : `<div class="note">还没填单刀伤害。客户端没有伤害公式，本计算器<strong>不做估算</strong>，请填实测值。</div>`;
 
   renderVerdict(r);
   renderTable(r);
   renderGear(r.lv);
+  const warn = document.getElementById('pddwarn');
+  warn.innerHTML = r.real ? defenseWarning(r.all) : '';
 }
 
 fillWeapons();

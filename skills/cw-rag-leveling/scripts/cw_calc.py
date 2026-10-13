@@ -4,10 +4,9 @@
 Reads a CW RAG snapshot (catalog.sqlite) read-only and ranks monsters by
 "experience per hit": exp / ceil(hp / damage).
 
-The player's damage is NOT present in the client files. Supply the damage that
-was actually measured in game with --damage. Without it the tool falls back to a
-clearly-labelled placeholder so the ordering is still visible, but a placeholder
-is not evidence and must not be presented as the player's real damage.
+The player's damage is NOT present in the client files, so --damage is required.
+There is deliberately no fallback estimate: a guessed damage value silently
+produces a wrong ranking, and this tool refuses to do that.
 
 Client files stay read-only. This tool only reads the saved snapshot.
 """
@@ -23,7 +22,6 @@ from pathlib import Path
 DATABASE_NAME = "catalog.sqlite"
 MAX_STATIC_LEVEL = 110
 SKIPPED_NAME_MARKERS = ("Test(", "Super ", "Ultra ")
-PLACEHOLDER_DAMAGE = 100
 
 
 def connect(data_dir: Path) -> sqlite3.Connection:
@@ -49,13 +47,34 @@ def snapshot_summary(connection: sqlite3.Connection) -> dict:
     }
 
 
+def _static_info(fields_json: str) -> dict:
+    payload = json.loads(fields_json or "{}")
+    return {
+        key.split("/")[-1]: value
+        for key, value in (payload.get("static_info") or {}).items()
+    }
+
+
+def _as_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 def load_monsters(connection: sqlite3.Connection) -> list[dict]:
     map_names = {row["normalized_id"]: row["name"] for row in connection.execute(
         "select normalized_id, name from entities where kind = 'map'")}
 
     monsters = []
     for row in connection.execute(
-        "select normalized_id, name, level, hp, exp, physical_attack "
+        "select normalized_id, name, level, hp, exp, physical_attack, fields_json "
         "from entities where kind = 'mob'"
     ):
         name = row["name"] or ""
@@ -71,6 +90,8 @@ def load_monsters(connection: sqlite3.Connection) -> list[dict]:
             (row["normalized_id"],),
         ).fetchall()
 
+        info = _static_info(row["fields_json"])
+
         monsters.append({
             "id": row["normalized_id"],
             "name": name,
@@ -78,6 +99,9 @@ def load_monsters(connection: sqlite3.Connection) -> list[dict]:
             "hp": row["hp"],
             "exp": row["exp"],
             "atk": row["physical_attack"],
+            # 客户端的原始字段，不做任何解释。为 0 时实测表明面板伤害直接生效；
+            # 不为 0 时实际伤害会低于面板，但换算方式客户端没有提供。
+            "pdd_raw": _as_int(info.get("PDDamage")),
             "maps": [
                 {"id": p["map_id"], "name": map_names.get(p["map_id"]) or "(未命名)", "count": p["n"]}
                 for p in placements
@@ -112,7 +136,9 @@ def rank(monsters: list[dict], damage: int, min_nodes: int, max_hits: int,
             "exp_per_hit": monster["exp"] / hits,
             "best_maps": sorted(maps, key=lambda m: (-m["count"], m["name"])),
         })
-    ranked.sort(key=lambda m: (-m["exp_per_hit"], m["level"], m["name"]))
+    # 经验/刀相同的，优先选物防为 0 的（面板值可直接套用，风险最低）
+    ranked.sort(key=lambda m: (-m["exp_per_hit"], m.get("pdd_raw") or 0,
+                               m["level"], m["name"]))
     return ranked
 
 
@@ -136,7 +162,6 @@ def rank_with_fallback(monsters: list[dict], damage: int, min_nodes: int,
         if ranked:
             return ranked, note
 
-    # 等级范围本身太窄，放开下限
     ranked = rank(monsters, damage, 1, 999, 1, max_level)
     if ranked:
         return ranked, "已忽略「等级下限」，因为该范围内没有怪"
@@ -150,13 +175,25 @@ def format_maps(maps: list[dict], limit: int = 2) -> str:
     return "、".join("%s×%d" % (m["name"], m["count"]) for m in maps[:limit])
 
 
+def defense_note(monsters: list[dict]) -> str:
+    """根据原始 PDDamage 字段给一句可操作提醒，不推算伤害。"""
+    risky = [m for m in monsters if (m["pdd_raw"] or 0) > 0]
+    if not risky:
+        return "本页所有怪的物防字段都是 0，面板伤害可直接套用。"
+    worst = sorted(risky, key=lambda m: -(m["pdd_raw"] or 0))[:4]
+    listed = "、".join("%s(物防%s)" % (m["name"], m["pdd_raw"]) for m in worst)
+    return ("注意：%d 只怪的物防字段不为 0（如 %s）。该字段为 0 时面板伤害直接生效；"
+            "不为 0 时实际伤害会低于面板，客户端未提供换算方式，本工具不推算。"
+            % (len(risky), listed))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="按「经验/刀」为 CW 普通攻击练级路线排序怪物。")
     parser.add_argument("--data-dir", required=True, type=Path,
                         help="CW RAG 快照目录（含 catalog.sqlite）")
-    parser.add_argument("--damage", type=int, default=None,
-                        help="游戏内实测的单刀伤害。强烈建议提供")
+    parser.add_argument("--damage", required=True, type=int,
+                        help="游戏内实测的单刀伤害（必填；客户端无伤害公式，不能估算）")
     parser.add_argument("--level", type=int, default=None,
                         help="角色等级；用于推算等级下限")
     parser.add_argument("--level-gap", type=int, default=15,
@@ -169,20 +206,16 @@ def main() -> int:
                         help="最多几刀能杀，默认 3")
     parser.add_argument("--atk-cap", type=int, default=None,
                         help="只考虑攻击力不高于此值的怪（更安全）")
+    parser.add_argument("--max-pdd", type=int, default=None,
+                        help="只考虑物防字段不高于此值的怪（避开打不动的）")
     parser.add_argument("--top", type=int, default=15)
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     args = parser.parse_args()
 
-    if args.damage is None or args.damage <= 0:
-        damage = PLACEHOLDER_DAMAGE
-        damage_source = ("占位值 %d（未提供 --damage；排序仅供内部参考，"
-                         "不能当作玩家真实伤害）" % PLACEHOLDER_DAMAGE)
-        damage_is_real = False
-    else:
-        damage = args.damage
-        damage_source = "玩家实测 %d" % damage
-        damage_is_real = True
+    if args.damage <= 0:
+        parser.error("--damage 必须是正整数")
 
+    damage = args.damage
     min_level = args.min_level
     if min_level is None:
         min_level = max(1, (args.level or 1) - args.level_gap)
@@ -199,19 +232,21 @@ def main() -> int:
         monsters, damage, args.min_nodes, args.max_hits, min_level, max_level)
     if args.atk_cap is not None:
         ranked = [m for m in ranked if (m["atk"] or 0) <= args.atk_cap]
+    if args.max_pdd is not None:
+        ranked = [m for m in ranked if (m["pdd_raw"] or 0) <= args.max_pdd]
 
     if args.json:
         print(json.dumps({
             "snapshot": summary,
             "damage": damage,
-            "damage_is_measured": damage_is_real,
-            "damage_source": damage_source,
+            "damage_source": "玩家实测 %d" % damage,
             "filters": {
                 "min_level": min_level,
                 "max_level": max_level,
                 "min_nodes": args.min_nodes,
                 "max_hits": args.max_hits,
                 "atk_cap": args.atk_cap,
+                "max_pdd": args.max_pdd,
             },
             "relaxed": relaxed,
             "total": len(ranked),
@@ -222,7 +257,7 @@ def main() -> int:
     print("快照: %s / %s / schema %s（构建于 %s）"
           % (summary.get("edition"), summary.get("region"),
              summary.get("schema_version"), summary.get("built_at")))
-    print("单刀伤害: %s" % damage_source)
+    print("单刀伤害: 玩家实测 %d" % damage)
     print("筛选: 等级 %s–%s，单图至少 %s 只，最多 %s 刀"
           % (min_level, max_level, args.min_nodes, args.max_hits))
     if relaxed:
@@ -230,7 +265,7 @@ def main() -> int:
     print()
 
     if not ranked:
-        print("没有符合条件的怪。放宽 --max-hits / --min-nodes，或调高 --max-level。")
+        print("没有符合条件的怪。放宽 --max-hits / --min-nodes / --max-pdd，或调高 --max-level。")
         return 0
 
     within_two = [m for m in ranked if m["hits"] <= 2]
@@ -247,12 +282,16 @@ def main() -> int:
     print()
 
     print("== 按经验/刀排序（前 %d 名）==" % min(args.top, len(ranked)))
-    print("  %-20s %5s %8s %5s %9s %8s  %s"
-          % ("怪名", "等级", "血量", "几刀", "经验/刀", "每只经验", "推荐地图"))
+    print("  %-20s %5s %8s %5s %9s %8s %6s  %s"
+          % ("怪名", "等级", "血量", "几刀", "经验/刀", "每只经验", "物防", "推荐地图"))
     for m in ranked[:args.top]:
-        print("  %-20s %5s %8s %5s %9.0f %8s  %s"
+        pdd = m["pdd_raw"]
+        print("  %-20s %5s %8s %5s %9.0f %8s %6s  %s"
               % (m["name"], m["level"], m["hp"], m["hits"],
-                 m["exp_per_hit"], m["exp"], format_maps(m["best_maps"])))
+                 m["exp_per_hit"], m["exp"], "—" if pdd is None else pdd,
+                 format_maps(m["best_maps"])))
+    print()
+    print(defense_note(ranked[:args.top]))
     return 0
 
 

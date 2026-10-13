@@ -41,13 +41,26 @@ def static_info(fields_json: str) -> dict:
     return out
 
 
+def _as_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 def build_mobs(connection: sqlite3.Connection) -> list[dict]:
     map_names = {row["normalized_id"]: row["name"] for row in connection.execute(
         "select normalized_id, name from entities where kind = 'map'")}
 
     mobs = []
     for row in connection.execute(
-        "select normalized_id, name, level, hp, exp, physical_attack "
+        "select normalized_id, name, level, hp, exp, physical_attack, fields_json "
         "from entities where kind = 'mob'"
     ):
         name = row["name"] or ""
@@ -63,6 +76,8 @@ def build_mobs(connection: sqlite3.Connection) -> list[dict]:
             (row["normalized_id"],),
         ).fetchall()
 
+        info = static_info(row["fields_json"])
+
         mobs.append({
             "id": row["normalized_id"],
             "name": name,
@@ -70,6 +85,9 @@ def build_mobs(connection: sqlite3.Connection) -> list[dict]:
             "hp": row["hp"],
             "exp": row["exp"],
             "atk": row["physical_attack"],
+            # 原始字段，不改写含意。0 表示实测可直接套用面板伤害；
+            # 非 0 时实际伤害更低，但换算方式未公开，因此只展示不参与计算。
+            "pdd": _as_int(info.get("PDDamage")),
             "maps": [
                 {"name": map_names.get(p["map_id"]) or "(未命名)", "count": p["n"]}
                 for p in placements

@@ -74,27 +74,30 @@ class LevelingFixture(unittest.TestCase):
     def snapshot(monsters=None) -> dict:
         if monsters is None:
             monsters = [
-                # (id, name, level, hp, exp, attack)
-                ("100", "Snail", 1, 40, 2, 3),
-                ("200", "Slime", 6, 100, 12, 13),
-                ("300", "Jr. Necki", 21, 300, 39, 92),
+                # (id, name, level, hp, exp, attack, PDDamage)
+                ("100", "Snail", 1, 40, 2, 3, 0),
+                ("200", "Slime", 6, 100, 12, 13, 10),
+                ("300", "Jr. Necki", 21, 300, 39, 92, 0),
                 # 同名不同 ID：验证不按名字合并
-                ("800300", "Jr. Necki", 25, 900, 80, 139),
+                ("800300", "Jr. Necki", 25, 900, 80, 139, 0),
                 # 高级厚血怪：用来触发「无法一两刀」
-                ("999", "Drake", 50, 4000, 133, 287),
+                ("999", "Drake", 50, 4000, 133, 287, 15),
+                # 高物防怪：验证会被告警而不是被算进刀数
+                ("888", "Iron Hog", 28, 500, 52, 136, 500),
                 # 测试怪：必须被跳过
-                ("9990000", "Test(Basic)", 30, 2100000000, None, 166),
+                ("9990000", "Test(Basic)", 30, 2100000000, None, 166, 0),
                 # 超怪：必须被跳过
-                ("91", "Super Slime", 200, 9999, 0, 1),
+                ("91", "Super Slime", 200, 9999, 0, 1, 0),
             ]
         entities = []
-        for index, (mob_id, name, level, hp, exp, attack) in enumerate(monsters):
+        for index, (mob_id, name, level, hp, exp, attack, pdd) in enumerate(monsters):
             # 列投影由 cw_rag._numeric_value 从 fields["static_info"]["info/<name>"]
             # 读取，字段名为 level / maxHP / exp / PADamage。
             static_info = {
                 "info/level": str(level),
                 "info/maxHP": str(hp),
                 "info/PADamage": str(attack),
+                "info/PDDamage": str(pdd),
             }
             if exp is not None:
                 static_info["info/exp"] = str(exp)
@@ -126,6 +129,10 @@ class LevelingFixture(unittest.TestCase):
         for node in range(10):
             placements.append({"map_id": "1000", "node_id": str(200 + node), "mob_id": "999",
                                "x": None, "y": None, "raw_json": "{\"id\":\"999\"}"})
+        # 高物防怪也要有刷怪点，才能进入排序
+        for node in range(8):
+            placements.append({"map_id": "1000", "node_id": str(300 + node), "mob_id": "888",
+                               "x": None, "y": None, "raw_json": "{\"id\":\"888\"}"})
         # 只有 1 只，测 --min-nodes
         placements.append({"map_id": "2000", "node_id": "0", "mob_id": "300",
                            "x": None, "y": None, "raw_json": "{\"id\":\"300\"}"})
@@ -284,27 +291,29 @@ class TestSnapshotReading(LevelingFixture):
         self.assertIn("找不到快照", str(caught.exception))
 
 
-class TestPlaceholderDamageIsLabelled(LevelingFixture):
-    def test_missing_damage_is_flagged_as_not_measured(self) -> None:
-        payload = self.run_calc_json("--data-dir", self.data_dir, "--level", 10)
-        self.assertFalse(payload["damage_is_measured"])
-        self.assertIn("占位值", payload["damage_source"])
+class TestDamageIsRequired(LevelingFixture):
+    """客户端没有伤害公式，任何估算都会偏乐观，因此 --damage 是必填的。"""
 
-    def test_measured_damage_is_flagged_as_measured(self) -> None:
-        payload = self.run_calc_json("--data-dir", self.data_dir, "--level", 10,
-                                     "--damage", 120)
-        self.assertTrue(payload["damage_is_measured"])
+    def test_missing_damage_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_calc("--data-dir", self.data_dir, "--level", 10)
+
+    def test_zero_damage_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_calc("--data-dir", self.data_dir, "--damage", 0)
+
+    def test_negative_damage_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_calc("--data-dir", self.data_dir, "--damage", -5)
+
+    def test_there_is_no_estimate_function(self) -> None:
+        self.assertFalse(hasattr(cw_calc, "estimate_damage"),
+                         "不应存在任何伤害估算函数")
+
+    def test_measured_damage_is_used(self) -> None:
+        payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 120)
         self.assertEqual(payload["damage"], 120)
-
-    def test_zero_damage_is_treated_as_not_measured(self) -> None:
-        payload = self.run_calc_json("--data-dir", self.data_dir, "--level", 10, "--damage", 0)
-        self.assertFalse(payload["damage_is_measured"])
-
-    def test_placeholder_text_warns_it_is_not_evidence(self) -> None:
-        code, out = self.run_calc("--data-dir", self.data_dir, "--level", 10)
-        self.assertEqual(code, 0)
-        self.assertIn("占位值", out)
-        self.assertIn("不能当作玩家真实伤害", out)
+        self.assertEqual(payload["damage_source"], "玩家实测 120")
 
 
 class TestCommandLineOutput(LevelingFixture):
@@ -342,7 +351,6 @@ class TestCommandLineOutput(LevelingFixture):
 
 class TestWebDataExport(LevelingFixture):
     def build(self, out_dir: Path) -> tuple[list, dict]:
-        code = export_web_data.main.__wrapped__ if hasattr(export_web_data.main, "__wrapped__") else None
         previous = sys.argv
         sys.argv = ["export_web_data.py", "--data-dir", str(self.data_dir),
                     "--out-dir", str(out_dir)]
@@ -363,20 +371,23 @@ class TestWebDataExport(LevelingFixture):
     def test_export_matches_the_snapshot(self) -> None:
         mobs, gear = self.build(self.root / "web")
         by_id = {m["id"]: m for m in mobs}
-        self.assertEqual(set(by_id), {"100", "200", "300", "800300", "999"})
+        self.assertEqual(set(by_id), {"100", "200", "300", "800300", "999", "888"})
         self.assertEqual(by_id["100"]["hp"], 40)
         self.assertEqual(by_id["100"]["exp"], 2)
         self.assertEqual(by_id["999"]["hp"], 4000)
 
-    def test_export_excludes_unverified_and_skipped_monsters(self) -> None:
+    def test_export_carries_raw_defense_field(self) -> None:
+        mobs, _ = self.build(self.root / "web-pdd")
+        by_id = {m["id"]: m for m in mobs}
+        self.assertEqual(by_id["100"]["pdd"], 0)
+        self.assertEqual(by_id["888"]["pdd"], 500)
+        self.assertEqual(by_id["999"]["pdd"], 15)
+
+    def test_export_excludes_skipped_monsters(self) -> None:
         mobs, _ = self.build(self.root / "web2")
         names = {m["name"] for m in mobs}
         self.assertNotIn("Test(Basic)", names)
         self.assertNotIn("Super Slime", names)
-        # 防御/闪避字段含义未证实，不得导出
-        for monster in mobs:
-            self.assertNotIn("pdd", monster)
-            self.assertNotIn("eva", monster)
 
     def test_export_creates_output_directory(self) -> None:
         target = self.root / "nested" / "web"
@@ -384,6 +395,54 @@ class TestWebDataExport(LevelingFixture):
         self.build(target)
         self.assertTrue((target / "mobs.js").is_file())
         self.assertTrue((target / "gear.js").is_file())
+
+
+class TestMonsterDefenseIsShownNotModelled(LevelingFixture):
+    """物防字段只展示和告警，不参与刀数计算。
+
+    客户端没有给出物防如何进入伤害公式，所以本工具不编换算。
+    """
+
+    def test_defense_field_is_read_from_snapshot(self) -> None:
+        monsters = {m["id"]: m for m in self.open_snapshot()}
+        self.assertEqual(monsters["100"]["pdd_raw"], 0)
+        self.assertEqual(monsters["888"]["pdd_raw"], 500)
+
+    def test_hits_ignore_defense(self) -> None:
+        monsters = self.open_snapshot()
+        # Snail: 40 血, 物防 0；Iron Hog: 500 血, 物防 500
+        # 两者刀数都只由血量/伤害决定，物防不参与
+        ranked = cw_calc.rank(monsters, damage=50, min_nodes=1, max_hits=99,
+                              min_level=1, max_level=100)
+        by_id = {m["id"]: m for m in ranked}
+        self.assertIn("100", by_id)
+        self.assertIn("888", by_id)
+        self.assertEqual(by_id["100"]["hits"], 1)   # ceil(40/50)
+        self.assertEqual(by_id["888"]["hits"], 10)  # ceil(500/50)，物防 500 不影响
+
+    def test_defense_note_flags_positive_defense(self) -> None:
+        monsters = self.open_snapshot()
+        note = cw_calc.defense_note(monsters)
+        self.assertIn("物防", note)
+        self.assertIn("Iron Hog", note)
+
+    def test_defense_note_says_clear_when_all_zero(self) -> None:
+        clean = [{"name": "A", "pdd_raw": 0}, {"name": "B", "pdd_raw": None}]
+        note = cw_calc.defense_note(clean)
+        self.assertIn("都是 0", note)
+
+    def test_max_pdd_filter_excludes_hard_monsters(self) -> None:
+        payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 50,
+                                     "--max-pdd", 0, "--top", 99)
+        self.assertTrue(payload["monsters"], "应仍有物防为 0 的怪")
+        for monster in payload["monsters"]:
+            self.assertFalse(monster.get("pdd_raw"),
+                             "物防应被过滤为 0，实际=%s" % monster.get("pdd_raw"))
+
+    def test_cli_output_has_defense_column(self) -> None:
+        code, out = self.run_calc("--data-dir", self.data_dir, "--damage", 50)
+        self.assertEqual(code, 0)
+        self.assertIn("物防", out)
 
 
 class TestWebCalculatorAssets(unittest.TestCase):
@@ -411,6 +470,22 @@ class TestWebCalculatorAssets(unittest.TestCase):
         html = self.html_path.read_text(encoding="utf-8")
         self.assertEqual(len(re.findall(r"<div\b", html)), len(re.findall(r"</div>", html)))
 
+    def test_calculator_does_not_estimate_damage(self) -> None:
+        html = self.html_path.read_text(encoding="utf-8")
+        self.assertNotIn("estimateDamage", html,
+                         "网页不应保留任何伤害估算函数")
+        self.assertNotIn("* 0.8", html,
+                         "网页不应保留估算用的系数")
+
+    def test_calculator_asks_for_measured_damage(self) -> None:
+        html = self.html_path.read_text(encoding="utf-8")
+        self.assertIn("请先填", html)
+        self.assertIn("单刀伤害", html)
+
+    def test_calculator_shows_defense_column(self) -> None:
+        html = self.html_path.read_text(encoding="utf-8")
+        self.assertIn("物防", html)
+
 
 class TestSkillDocumentation(unittest.TestCase):
     def test_child_skill_declares_name_and_description(self) -> None:
@@ -422,7 +497,7 @@ class TestSkillDocumentation(unittest.TestCase):
     def test_child_skill_states_the_damage_limit(self) -> None:
         text = (LEVELING_ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("没有伤害计算公式", text)
-        self.assertIn("占位值", text)
+        self.assertIn("必填", text)
 
     def test_parent_skill_links_to_child(self) -> None:
         text = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")
