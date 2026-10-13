@@ -162,6 +162,31 @@ Yes. The Skill can rewrite likely Chinese names or concepts as English source te
 
 ### Does it calculate exact leveling efficiency or damage?
 
-No. The snapshot contains static client data. It does not provide live drops, server rates, combat formulas, or quest execution. Advice must stay within the retrieved fields and state assumptions when character details are missing.
+Damage itself cannot be derived from the client files. The snapshot contains static client data; it does not provide live drops, server rates, combat formulas, or quest execution.
+
+A leveling decision can still be made. The child skill [cw-rag-leveling](skills/cw-rag-leveling/README.md) ranks monsters by experience per hit to pick the best current hunting target. Its hit count needs the damage you **measured in game** - the client files contain no damage formula, so that number cannot be derived.
+
+## Child skills
+
+| Child skill | Purpose |
+| --- | --- |
+| [cw-rag-leveling](skills/cw-rag-leveling/README.md) | Ranks monsters by experience per hit for a leveling route, with gear and skill-point advice |
+
+Child skills reuse the same snapshot, add no new data source, and make no network requests.
+
+## Running the tests
+
+Tests use `unittest` and are built entirely on synthetic snapshots, so **no real client is needed**:
+
+```powershell
+cd "$cwSkillSource"
+py -3 -m unittest discover -s tests -v
+```
+
+Only the leveling child skill:
+
+```powershell
+py -3 -m unittest tests.test_cw_leveling -v
+```
 
 See [SKILL.md](SKILL.md) for query behavior, [docs/DESIGN.md](docs/DESIGN.md) for the retrieval contract, and [docs/SOURCE_PROVENANCE.md](docs/SOURCE_PROVENANCE.md) for parser sources and licenses.

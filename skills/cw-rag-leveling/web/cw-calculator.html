@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>冒险岛 CW 战士练级计算器</title>
+<style>
+  :root{
+    --bg:#0f1420; --card:#1a2130; --card2:#222b3d; --line:#2f3a50;
+    --txt:#e8edf7; --dim:#93a0b8; --accent:#ffb454; --good:#4ade80;
+    --warn:#fbbf24; --bad:#f87171; --blue:#60a5fa; --purple:#c084fc;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--txt);
+    font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    font-size:15px; line-height:1.65;
+  }
+  .wrap{max-width:1240px; margin:0 auto; padding:26px 20px 80px}
+  h1{font-size:25px; margin:0 0 6px}
+  .sub{color:var(--dim); font-size:13px; margin-bottom:22px}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:18px}
+  .card h2{font-size:16px; margin:0 0 14px; color:var(--accent)}
+  .grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px}
+  label{display:block; font-size:13px; color:var(--dim); margin-bottom:5px}
+  input,select{
+    width:100%; padding:9px 11px; background:var(--card2); color:var(--txt);
+    border:1px solid var(--line); border-radius:8px; font-size:15px; font-family:inherit;
+  }
+  input:focus,select:focus{outline:none; border-color:var(--accent)}
+  button{
+    padding:10px 24px; background:var(--accent); color:#1a1206; border:none;
+    border-radius:8px; font-size:15px; font-weight:700; cursor:pointer; font-family:inherit;
+  }
+  button:hover{filter:brightness(1.1)}
+  .row{display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end}
+  table{width:100%; border-collapse:collapse; font-size:14px}
+  th,td{padding:8px 9px; text-align:left; border-bottom:1px solid var(--line)}
+  th{color:var(--dim); font-weight:400; font-size:12px; white-space:nowrap}
+  td.num,th.num{text-align:right; font-variant-numeric:tabular-nums}
+  tr:hover td{background:rgba(255,255,255,.03)}
+  .tag{display:inline-block; padding:1px 7px; border-radius:5px; font-size:12px; font-weight:700}
+  .t1{background:rgba(74,222,128,.2); color:var(--good)}
+  .t2{background:rgba(96,165,250,.2); color:var(--blue)}
+  .t3{background:rgba(251,191,36,.2); color:var(--warn)}
+  .t4{background:rgba(248,113,113,.2); color:var(--bad)}
+  .t5{background:rgba(192,132,252,.2); color:var(--purple)}
+  .top3 td{background:rgba(255,180,84,.09)}
+  .rank{font-weight:700; color:var(--accent)}
+  .kpi{display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px}
+  .kpi div{background:var(--card2); border-radius:9px; padding:11px 13px}
+  .kpi .k{font-size:12px; color:var(--dim)}
+  .kpi .v{font-size:19px; font-weight:700; margin-top:2px}
+  .note{background:rgba(96,165,250,.08); border-left:3px solid var(--blue); padding:10px 14px; border-radius:6px; font-size:13px; color:var(--dim)}
+  .warnbox{background:rgba(251,191,36,.08); border-left:3px solid var(--warn); padding:10px 14px; border-radius:6px; font-size:13px}
+  .okbox{background:rgba(74,222,128,.08); border-left:3px solid var(--good); padding:10px 14px; border-radius:6px; font-size:13px}
+  .badbox{background:rgba(248,113,113,.08); border-left:3px solid var(--bad); padding:10px 14px; border-radius:6px; font-size:13px}
+  .verdict{font-size:16px; font-weight:700; margin-bottom:8px}
+  .big-reco{background:var(--card2); border-radius:10px; padding:14px 16px; margin-bottom:12px}
+  .big-reco .name{font-size:20px; font-weight:700; color:var(--accent)}
+  .mapname{color:var(--dim); font-size:12px}
+  .mt8{margin-top:8px} .mt14{margin-top:14px}
+  @media(max-width:640px){ .wrap{padding:16px 12px 50px} h1{font-size:20px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>冒险岛 CW 战士练级计算器</h1>
+<div class="sub">只用普通攻击 · 单手剑 + 盾牌 · 目标：一两刀砍死 · 自动算最优练级路线</div>
+
+<div class="card">
+  <h2>第一步：填你的角色</h2>
+  <div class="grid">
+    <div>
+      <label>我的等级</label>
+      <input id="lv" type="number" value="30" min="1" max="120">
+    </div>
+    <div>
+      <label>我的力量（STR）</label>
+      <input id="str" type="number" value="120" min="4" max="999">
+    </div>
+    <div>
+      <label>我的敏捷（DEX）</label>
+      <input id="dex" type="number" value="30" min="4" max="999">
+    </div>
+    <div>
+      <label>我的武器</label>
+      <select id="weapon"></select>
+    </div>
+    <div>
+      <label>武器攻击力加成（卷轴等）</label>
+      <input id="watk" type="number" value="0" min="0" max="300">
+    </div>
+    <div>
+      <label>我打怪时屏幕上的单刀伤害</label>
+      <input id="dmg" type="number" value="0" min="0" max="9999999" placeholder="不知道就填 0">
+    </div>
+  </div>
+  <div class="note mt8">
+    <strong>最后那栏最重要。</strong>「单刀伤害」就是你打怪时跳出来的数字。填了它，结果就完全按你的真实情况算。
+  </div>
+</div>
+
+<div class="card">
+  <h2>第二步：你的当前状态</h2>
+  <div class="kpi" id="kpi"></div>
+  <div id="dmgnote" class="mt8"></div>
+</div>
+
+<div class="card">
+  <h2>第三步：现在该打什么（结论）</h2>
+  <div id="verdict"></div>
+</div>
+
+<div class="card">
+  <h2>第四步：完整候选表</h2>
+  <div class="row" style="margin-bottom:14px">
+    <div>
+      <label>单张地图最少几只怪</label>
+      <select id="minnodes">
+        <option value="1">不限</option>
+        <option value="8" selected>8 只以上</option>
+        <option value="15">15 只以上</option>
+        <option value="25">25 只以上（很密集）</option>
+      </select>
+    </div>
+    <div>
+      <label>最多几刀（不想看太多选 2）</label>
+      <select id="maxhits">
+        <option value="1">一刀</option>
+        <option value="2">两刀以内</option>
+        <option value="3">三刀以内</option>
+        <option value="99" selected>全部显示</option>
+      </select>
+    </div>
+    <div>
+      <label>怪物等级上限</label>
+      <input id="maxlv" type="number" min="1" value="35">
+    </div>
+    <div>
+      <label>只打等级不低于自己 −</label>
+      <input id="gap" type="number" min="0" max="200" value="15">
+    </div>
+    <button id="go">重新计算</button>
+  </div>
+  <div style="overflow-x:auto">
+    <table id="result">
+      <thead>
+        <tr>
+          <th>排名</th><th>怪名</th><th class="num">等级</th><th class="num">血量</th>
+          <th class="num">几刀</th><th class="num">经验/刀</th><th class="num">每只经验</th>
+          <th class="num">攻击力</th><th>推荐地图</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="note mt8">
+    <strong>排序依据是「经验/刀」</strong>：一刀秒 = 它的全部经验；两刀 = 经验除以二。
+    这个数字越高，代表你每挥一刀换来的经验越多。<br>
+    「几刀」那一栏的颜色：<span class="tag t1">绿=一刀</span>
+    <span class="tag t2">蓝=两刀</span>
+    <span class="tag t3">黄=三刀</span>
+    <span class="tag t4">红=四刀以上</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>第五步：接下来该换什么</h2>
+  <div class="grid" style="gap:22px">
+    <div>
+      <label style="color:var(--accent);font-weight:700;font-size:13px">武器（攻速快的单手剑）</label>
+      <div id="weaponAdvice"></div>
+    </div>
+    <div>
+      <label style="color:var(--accent);font-weight:700;font-size:13px">盾牌（加防御最多）</label>
+      <div id="shieldAdvice"></div>
+    </div>
+    <div>
+      <label style="color:var(--accent);font-weight:700;font-size:13px">鞋子（唯一加回避）</label>
+      <div id="shoeAdvice"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>怎么用</h2>
+  <ol style="margin:0;padding-left:22px;font-size:14px">
+    <li>直接点「重新计算」，看第三步的结论。</li>
+    <li>进游戏按它打几只，<strong>记住屏幕上跳出的伤害数字</strong>。</li>
+    <li>填进第一栏的「单刀伤害」，再点「重新计算」——结果就准了。</li>
+    <li>每升几级或换了武器，回来重填一次。</li>
+    <li><strong>标准：你能一两刀砍死的怪里，挑经验最高的那只。</strong></li>
+  </ol>
+  <div class="warnbox mt8">
+    <strong>只按普通攻击的原则：</strong>不开输出技能，所以全程不耗蓝、不扣血，血药蓝药一颗不用买。<br>
+    唯一开「<strong>铁甲</strong>」——进图开一次，15 蓝，减伤 25%，撑 10 分钟。
+  </div>
+</div>
+
+<div class="card">
+  <h2>重要提醒：高级别打不到「一两刀」</h2>
+  <div class="badbox">
+    从客户端数据看，<strong>怪物血量涨得比你的伤害快得多</strong>：<br><br>
+    · 60 级红龙（Red Drake）有 <strong>5184 血</strong><br>
+    · 70 级战士用最好的单手剑，普通攻击大约 <strong>500～900</strong> 一刀<br>
+    · 也就是<strong>最快也要 6 刀以上</strong><br><br>
+    所以「一两刀秒怪」这条标准，<strong>只有低级（大约 35 级以前）能做到</strong>。
+    往后血量差距越拉越大，这是数值结构决定的，不是装备问题。<br><br>
+    <strong>所以 35 级以后，判断标准要改成「经验/刀最高的怪」</strong>——计算器的排序就是按这个来的，你照样能用。
+  </div>
+</div>
+
+<div class="card">
+  <h2>关于数据的说明</h2>
+  <div style="font-size:13px;color:var(--dim)">
+    怪物等级、血量、经验、攻击力、刷新点数量全部来自你电脑里的 CW 客户端文件（快照构建于 2026-10-09），是真实数据。<br><br>
+    <strong>但游戏文件里没有伤害计算公式</strong>，所以「几刀」是这样估的：<br>
+    · 你填了实测伤害 → 直接用它，准确<br>
+    · 没填 → 按「(力量×4 + 敏捷) × 武器攻击 ÷ 100 × 0.8」粗估<br><br>
+    客户端里还有怪物防御、闪避等字段，但含义没有官方说明，<strong>所以计算器没有把它们算进去</strong>——我不拿没搞懂的字段编公式。<br><br>
+    装备掉落率、服务器倍率、活动加成，客户端文件里也没有。
+  </div>
+</div>
+
+</div>
+
+<script src="mobs.js"></script>
+<script src="gear.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const WEAPONS = GEAR.weapons.filter(w => w.lv >= 15 && !w.two);
+
+function fillWeapons(){
+  const sel = $('weapon');
+  sel.innerHTML = '';
+  WEAPONS.forEach((w,i)=>{
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = `Lv${w.lv} ${w.name}（攻${w.atk} 攻速${w.spd} 需力${w.str}）`;
+    sel.appendChild(o);
+  });
+}
+
+function pickWeapon(lv){
+  const ok = WEAPONS.filter(w => w.lv <= lv);
+  if(!ok.length) return 0;
+  ok.sort((a,b)=> (a.spd||9)-(b.spd||9) || b.lv-a.lv || b.atk-a.atk);
+  return WEAPONS.indexOf(ok[0]);
+}
+
+function estimateDamage(){
+  const str = +$('str').value || 4;
+  const dex = +$('dex').value || 4;
+  const w = WEAPONS[+$('weapon').value] || WEAPONS[0];
+  const watk = (w ? w.atk : 0) + (+$('watk').value || 0);
+  const maxDmg = (str * 4 + dex) * watk / 100;
+  return { max: Math.round(maxDmg), typical: Math.max(1, Math.round(maxDmg * 0.8)) };
+}
+
+function currentDamage(){
+  const manual = +$('dmg').value || 0;
+  if(manual > 0) return { dmg: manual, real: true };
+  const e = estimateDamage();
+  return { dmg: e.typical, max: e.max, real: false };
+}
+
+function armorDefense(lv){
+  let pdd = 0;
+  for(const slot of ["Cap","Longcoat","Glove","Cape"]){
+    const list = (GEAR.armor[slot] || []).filter(x => x.lv <= lv);
+    if(list.length) pdd += list[list.length-1].pdd;
+  }
+  const sh = GEAR.shields.filter(s => s.lv <= lv);
+  if(sh.length) pdd += sh[sh.length-1].pdd;
+  return pdd;
+}
+
+function tagFor(h){
+  const cls = h===1?'t1': h===2?'t2': h===3?'t3': 't4';
+  return `<span class="tag ${cls}">${h} 刀</span>`;
+}
+
+function computeOne(lv, dmg, minNodes, maxLv, minLv){
+  const out = [];
+  for(const m of MOBS){
+    if(m.level > maxLv || m.level < minLv || m.exp <= 0) continue;
+    const maps = m.maps.filter(x => x.count >= minNodes).sort((a,b)=> b.count - a.count);
+    if(!maps.length) continue;
+    const hits = Math.max(1, Math.ceil(m.hp / dmg));
+    out.push({ ...m, hits, eph: m.exp / hits, maps });
+  }
+  out.sort((a,b)=> b.eph - a.eph);
+  return out;
+}
+
+function compute(){
+  const lv = +$('lv').value || 1;
+  const { dmg, real } = currentDamage();
+  const minNodes = +$('minnodes').value;
+  const maxHits = +$('maxhits').value;
+  const maxLv = +$('maxlv').value || lv + 5;
+  const gap = +$('gap').value || 0;
+  const minLv = Math.max(1, lv - gap);
+
+  // 逐级放宽，保证永远有结果
+  let all = computeOne(lv, dmg, minNodes, maxLv, minLv);
+  let relaxed = null;
+  if(!all.length){
+    all = computeOne(lv, dmg, minNodes, maxLv, 1);
+    relaxed = '已忽略「等级下限」，因为按原条件没有怪符合。';
+  }
+  if(!all.length){
+    all = computeOne(lv, dmg, 1, maxLv, 1);
+    relaxed = '已忽略「地图最少几只怪」，因为没有地图满足密度要求。';
+  }
+  if(!all.length){
+    all = computeOne(lv, dmg, 1, 999, 1);
+    relaxed = '已忽略「等级上限」，因为原范围内没有怪。';
+  }
+
+  return {
+    lv, dmg, real, all, relaxed,
+    within2: all.filter(x => x.hits <= 2),
+    filtered: all.filter(x => x.hits <= maxHits),
+  };
+}
+
+function renderVerdict(r){
+  const box = $('verdict');
+  if(!r.all.length){
+    box.innerHTML = `<div class="warnbox">没有符合条件的怪。把「单张地图最少几只怪」调低，或把「怪物等级上限」调高试试。</div>`;
+    return;
+  }
+  const best = r.all[0];
+  let html = '';
+  if(r.relaxed){
+    html += `<div class="warnbox" style="margin-bottom:12px">⚠ 已自动放宽筛选：${r.relaxed}</div>`;
+  }
+
+  if(r.within2.length){
+    const b2 = r.within2[0];
+    html += `<div class="verdict" style="color:var(--good)">✅ 有能一两刀砍死的怪</div>`;
+    html += `<div class="big-reco">
+      <div>最推荐：<span class="name">${b2.name}</span> <span style="color:var(--dim)">（Lv${b2.level}，${b2.hp} 血）</span></div>
+      <div style="margin-top:6px">需要 <strong>${b2.hits} 刀</strong> · 每只经验 <strong>${b2.exp}</strong> · 经验/刀 <strong style="color:var(--good)">${b2.eph.toFixed(0)}</strong></div>
+      <div style="margin-top:6px;color:var(--dim);font-size:13px">去这里打：${b2.maps.slice(0,3).map(x=>`<strong style="color:var(--txt)">${x.name}</strong>（${x.count}只）`).join('、')}</div>
+    </div>`;
+    if(r.within2.length > 1){
+      html += `<div style="font-size:13px;color:var(--dim)">其它也能一两刀砍死的：${r.within2.slice(1,6).map(x=>`${x.name}（${x.hits}刀，经验/刀${x.eph.toFixed(0)}）`).join('、')}</div>`;
+    }
+  } else {
+    html += `<div class="verdict" style="color:var(--bad)">❌ 这个等级没有能一两刀砍死的怪</div>`;
+    html += `<div class="badbox" style="margin-bottom:12px">
+      你现在最快也要 <strong>${best.hits} 刀</strong>才能杀一只（${best.name}，${best.hp} 血）。<br>
+      这是数值结构决定的，不是装备问题——怪物血量涨得比你的伤害快。<br>
+      <strong>所以这里改成按「经验/刀」选怪，效果一样。</strong>
+    </div>`;
+    html += `<div class="big-reco">
+      <div>改用这个：<span class="name">${best.name}</span> <span style="color:var(--dim)">（Lv${best.level}，${best.hp} 血，需要 ${best.hits} 刀）</span></div>
+      <div style="margin-top:6px">每只经验 <strong>${best.exp}</strong> · 经验/刀 <strong style="color:var(--good)">${best.eph.toFixed(0)}</strong>（当前最高）</div>
+      <div style="margin-top:6px;color:var(--dim);font-size:13px">去这里打：${best.maps.slice(0,3).map(x=>`<strong style="color:var(--txt)">${x.name}</strong>（${x.count}只）`).join('、')}</div>
+    </div>`;
+  }
+  box.innerHTML = html;
+}
+
+function renderTable(r){
+  const tb = $('result').querySelector('tbody');
+  tb.innerHTML = '';
+  if(!r.filtered.length){
+    tb.innerHTML = '<tr><td colspan="9" style="color:var(--warn);padding:18px">没有符合「最多几刀」条件的怪。把它调成「全部显示」看看。</td></tr>';
+    return;
+  }
+  r.filtered.slice(0, 30).forEach((x,i)=>{
+    const tr = document.createElement('tr');
+    if(i < 3) tr.className = 'top3';
+    const maps = x.maps.slice(0,2).map(y=> `${y.name}×${y.count}`).join('、');
+    tr.innerHTML = `
+      <td class="rank">${i+1}</td>
+      <td><strong>${x.name}</strong></td>
+      <td class="num">${x.level}</td>
+      <td class="num">${x.hp.toLocaleString()}</td>
+      <td class="num">${tagFor(x.hits)}</td>
+      <td class="num"><strong style="color:var(--good)">${x.eph.toFixed(0)}</strong></td>
+      <td class="num">${x.exp}</td>
+      <td class="num">${x.atk}</td>
+      <td class="mapname">${maps}</td>`;
+    tb.appendChild(tr);
+  });
+}
+
+function renderGear(lv){
+  const wNow = WEAPONS.filter(w=> w.lv <= lv).sort((a,b)=> a.lv-b.lv).pop();
+  const wNext = WEAPONS.filter(w=> w.lv > lv).sort((a,b)=> a.lv-b.lv || (a.spd||9)-(b.spd||9))[0];
+  $('weaponAdvice').innerHTML =
+    `<div style="font-size:13px;color:var(--dim)">现在：${wNow?`<strong style="color:var(--txt)">Lv${wNow.lv} ${wNow.name}</strong>（攻${wNow.atk} 攻速${wNow.spd}）`:'无'}</div>` +
+    (wNext?`<div style="font-size:13px;color:var(--dim)">Lv${wNext.lv} 换：<strong style="color:var(--accent)">${wNext.name}</strong>（攻${wNext.atk} 攻速${wNext.spd} 需力${wNext.str}）</div>`
+          :'<div style="font-size:13px;color:var(--dim)">已是最高档。</div>');
+
+  const sNow = GEAR.shields.filter(s=> s.lv <= lv).sort((a,b)=> a.lv-b.lv).pop();
+  const sNext = GEAR.shields.filter(s=> s.lv > lv).sort((a,b)=> a.lv-b.lv)[0];
+  $('shieldAdvice').innerHTML =
+    `<div style="font-size:13px;color:var(--dim)">现在：${sNow?`<strong style="color:var(--txt)">Lv${sNow.lv} ${sNow.name}</strong>（防御${sNow.pdd}）`:'无'}</div>` +
+    (sNext?`<div style="font-size:13px;color:var(--dim)">Lv${sNext.lv} 换：<strong style="color:var(--accent)">${sNext.name}</strong>（防御${sNext.pdd}）</div>`
+          :'<div style="font-size:13px;color:var(--dim)">已是最高档。</div>') +
+    '<div style="font-size:12px;color:var(--dim);margin-top:6px">盾牌加的防御远多于防具，是你不喝药的关键。</div>';
+
+  const shoes = GEAR.armor['Shoes'] || [];
+  const shNow = shoes.filter(s=> s.lv <= lv).sort((a,b)=> a.lv-b.lv).pop();
+  const shNext = shoes.filter(s=> s.lv > lv && s.eva > 0).sort((a,b)=> a.lv-b.lv)[0];
+  $('shoeAdvice').innerHTML =
+    `<div style="font-size:13px;color:var(--dim)">现在：${shNow?`<strong style="color:var(--txt)">Lv${shNow.lv} ${shNow.name}</strong>（回避${shNow.eva} 防御${shNow.pdd}）`:'无'}</div>` +
+    (shNext?`<div style="font-size:13px;color:var(--dim)">Lv${shNext.lv} 换：<strong style="color:var(--accent)">${shNext.name}</strong>（回避${shNext.eva}）</div>`
+          :'<div style="font-size:13px;color:var(--dim)">已是最高档。</div>') +
+    '<div style="font-size:12px;color:var(--dim);margin-top:6px">回避 = 怪打空你，直接不掉血。</div>';
+}
+
+function rerender(){
+  const r = compute();
+  const est = estimateDamage();
+  $('kpi').innerHTML = `
+    <div><div class="k">单刀伤害</div><div class="v">${r.dmg}</div></div>
+    <div><div class="k">估算最高伤害</div><div class="v">${est.max}</div></div>
+    <div><div class="k">估算防御</div><div class="v">${armorDefense(r.lv)}</div></div>
+    <div><div class="k">候选怪种</div><div class="v">${r.all.length}</div></div>
+    <div><div class="k">最高经验/刀</div><div class="v" style="color:var(--good)">${r.all[0]?r.all[0].eph.toFixed(0):'—'}</div></div>`;
+
+  $('dmgnote').innerHTML = r.real
+    ? `<div class="okbox">正在用<strong>你实测的伤害 ${r.dmg}</strong>，结果准确。</div>`
+    : `<div class="note">现在是<strong>粗估伤害 ${r.dmg}</strong>（最高约 ${est.max}）。想要准确结果，把游戏里的实际伤害填进第一栏。</div>`;
+
+  renderVerdict(r);
+  renderTable(r);
+  renderGear(r.lv);
+}
+
+fillWeapons();
+$('weapon').value = pickWeapon(+$('lv').value || 30);
+$('maxlv').value = (+$('lv').value || 30) + 5;
+$('go').addEventListener('click', rerender);
+['lv','str','dex','weapon','watk','dmg','minnodes','maxhits','maxlv','gap'].forEach(id=>{
+  $(id).addEventListener('change', ()=>{
+    if(id === 'lv'){
+      const lv = +$('lv').value || 30;
+      $('maxlv').value = lv + 5;
+      $('weapon').value = pickWeapon(lv);
+    }
+    rerender();
+  });
+});
+rerender();
+</script>
+</body>
+</html>

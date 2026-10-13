@@ -22,3 +22,7 @@ data/
 *.sqlite3-*
 
 .catalog-*.tmp
+
+# 子 Skill 网页计算器由 export_web_data.py 生成，属于客户端派生数据，不入库
+skills/cw-rag-leveling/web/mobs.js
+skills/cw-rag-leveling/web/gear.js

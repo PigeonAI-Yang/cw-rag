@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Rank Classic World monsters for a normal-attack leveling route.
+
+Reads a CW RAG snapshot (catalog.sqlite) read-only and ranks monsters by
+"experience per hit": exp / ceil(hp / damage).
+
+The player's damage is NOT present in the client files. Supply the damage that
+was actually measured in game with --damage. Without it the tool falls back to a
+clearly-labelled placeholder so the ordering is still visible, but a placeholder
+is not evidence and must not be presented as the player's real damage.
+
+Client files stay read-only. This tool only reads the saved snapshot.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sqlite3
+import sys
+from pathlib import Path
+
+DATABASE_NAME = "catalog.sqlite"
+MAX_STATIC_LEVEL = 110
+SKIPPED_NAME_MARKERS = ("Test(", "Super ", "Ultra ")
+PLACEHOLDER_DAMAGE = 100
+
+
+def connect(data_dir: Path) -> sqlite3.Connection:
+    database = data_dir / DATABASE_NAME
+    if not database.is_file():
+        raise SystemExit(
+            "找不到快照: %s\n请先用 cw-rag 的 build 生成快照，或传入正确的 --data-dir。"
+            % database
+        )
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def snapshot_summary(connection: sqlite3.Connection) -> dict:
+    values = {row["key"]: row["value"] for row in connection.execute(
+        "select key, value from metadata")}
+    return {
+        "schema_version": values.get("schema_version"),
+        "edition": values.get("edition"),
+        "region": values.get("region"),
+        "built_at": values.get("built_at"),
+    }
+
+
+def load_monsters(connection: sqlite3.Connection) -> list[dict]:
+    map_names = {row["normalized_id"]: row["name"] for row in connection.execute(
+        "select normalized_id, name from entities where kind = 'map'")}
+
+    monsters = []
+    for row in connection.execute(
+        "select normalized_id, name, level, hp, exp, physical_attack "
+        "from entities where kind = 'mob'"
+    ):
+        name = row["name"] or ""
+        level = row["level"]
+        if not level or level > MAX_STATIC_LEVEL:
+            continue
+        if any(marker in name for marker in SKIPPED_NAME_MARKERS):
+            continue
+
+        placements = connection.execute(
+            "select map_id, count(*) as n from placements where mob_id = ? "
+            "group by map_id order by n desc",
+            (row["normalized_id"],),
+        ).fetchall()
+
+        monsters.append({
+            "id": row["normalized_id"],
+            "name": name,
+            "level": level,
+            "hp": row["hp"],
+            "exp": row["exp"],
+            "atk": row["physical_attack"],
+            "maps": [
+                {"id": p["map_id"], "name": map_names.get(p["map_id"]) or "(未命名)", "count": p["n"]}
+                for p in placements
+            ],
+        })
+    return monsters
+
+
+def hits_needed(hp: int | None, damage: int) -> int:
+    if not hp or hp <= 0:
+        return 1
+    return max(1, math.ceil(hp / damage))
+
+
+def rank(monsters: list[dict], damage: int, min_nodes: int, max_hits: int,
+         min_level: int, max_level: int) -> list[dict]:
+    ranked = []
+    for monster in monsters:
+        if monster["level"] > max_level or monster["level"] < min_level:
+            continue
+        if not monster["exp"]:
+            continue
+        maps = [m for m in monster["maps"] if m["count"] >= min_nodes]
+        if not maps:
+            continue
+        hits = hits_needed(monster["hp"], damage)
+        if hits > max_hits:
+            continue
+        ranked.append({
+            **monster,
+            "hits": hits,
+            "exp_per_hit": monster["exp"] / hits,
+            "best_maps": sorted(maps, key=lambda m: (-m["count"], m["name"])),
+        })
+    ranked.sort(key=lambda m: (-m["exp_per_hit"], m["level"], m["name"]))
+    return ranked
+
+
+def rank_with_fallback(monsters: list[dict], damage: int, min_nodes: int,
+                       max_hits: int, min_level: int, max_level: int) -> tuple[list[dict], str | None]:
+    """排序；若条件过严导致空结果，逐级放宽并返回放宽说明。
+
+    放宽顺序：最多几刀 → 地图密度 → 等级上限。永不返回空列表（除非快照本身没有怪）。
+    """
+    ranked = rank(monsters, damage, min_nodes, max_hits, min_level, max_level)
+    if ranked:
+        return ranked, None
+
+    attempts = [
+        (min_nodes, 999, "已忽略「最多几刀」限制"),
+        (1, 999, "已忽略「最多几刀」和「地图密度」限制"),
+        (1, 999, "已忽略全部筛选，仅按等级范围"),
+    ]
+    for nodes, hits, note in attempts:
+        ranked = rank(monsters, damage, nodes, hits, min_level, max_level)
+        if ranked:
+            return ranked, note
+
+    # 等级范围本身太窄，放开下限
+    ranked = rank(monsters, damage, 1, 999, 1, max_level)
+    if ranked:
+        return ranked, "已忽略「等级下限」，因为该范围内没有怪"
+    ranked = rank(monsters, damage, 1, 999, 1, MAX_STATIC_LEVEL)
+    if ranked:
+        return ranked, "已忽略「等级上限」，因为原范围内没有怪"
+    return ranked, None
+
+
+def format_maps(maps: list[dict], limit: int = 2) -> str:
+    return "、".join("%s×%d" % (m["name"], m["count"]) for m in maps[:limit])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="按「经验/刀」为 CW 普通攻击练级路线排序怪物。")
+    parser.add_argument("--data-dir", required=True, type=Path,
+                        help="CW RAG 快照目录（含 catalog.sqlite）")
+    parser.add_argument("--damage", type=int, default=None,
+                        help="游戏内实测的单刀伤害。强烈建议提供")
+    parser.add_argument("--level", type=int, default=None,
+                        help="角色等级；用于推算等级下限")
+    parser.add_argument("--level-gap", type=int, default=15,
+                        help="只考虑不低于（角色等级 − 此值）的怪，默认 15")
+    parser.add_argument("--min-level", type=int, default=None)
+    parser.add_argument("--max-level", type=int, default=None)
+    parser.add_argument("--min-nodes", type=int, default=8,
+                        help="单张地图至少要有多少只这种怪，默认 8")
+    parser.add_argument("--max-hits", type=int, default=3,
+                        help="最多几刀能杀，默认 3")
+    parser.add_argument("--atk-cap", type=int, default=None,
+                        help="只考虑攻击力不高于此值的怪（更安全）")
+    parser.add_argument("--top", type=int, default=15)
+    parser.add_argument("--json", action="store_true", help="输出 JSON")
+    args = parser.parse_args()
+
+    if args.damage is None or args.damage <= 0:
+        damage = PLACEHOLDER_DAMAGE
+        damage_source = ("占位值 %d（未提供 --damage；排序仅供内部参考，"
+                         "不能当作玩家真实伤害）" % PLACEHOLDER_DAMAGE)
+        damage_is_real = False
+    else:
+        damage = args.damage
+        damage_source = "玩家实测 %d" % damage
+        damage_is_real = True
+
+    min_level = args.min_level
+    if min_level is None:
+        min_level = max(1, (args.level or 1) - args.level_gap)
+    max_level = args.max_level if args.max_level is not None else MAX_STATIC_LEVEL
+
+    connection = connect(args.data_dir)
+    try:
+        monsters = load_monsters(connection)
+        summary = snapshot_summary(connection)
+    finally:
+        connection.close()
+
+    ranked, relaxed = rank_with_fallback(
+        monsters, damage, args.min_nodes, args.max_hits, min_level, max_level)
+    if args.atk_cap is not None:
+        ranked = [m for m in ranked if (m["atk"] or 0) <= args.atk_cap]
+
+    if args.json:
+        print(json.dumps({
+            "snapshot": summary,
+            "damage": damage,
+            "damage_is_measured": damage_is_real,
+            "damage_source": damage_source,
+            "filters": {
+                "min_level": min_level,
+                "max_level": max_level,
+                "min_nodes": args.min_nodes,
+                "max_hits": args.max_hits,
+                "atk_cap": args.atk_cap,
+            },
+            "relaxed": relaxed,
+            "total": len(ranked),
+            "monsters": ranked[:args.top],
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    print("快照: %s / %s / schema %s（构建于 %s）"
+          % (summary.get("edition"), summary.get("region"),
+             summary.get("schema_version"), summary.get("built_at")))
+    print("单刀伤害: %s" % damage_source)
+    print("筛选: 等级 %s–%s，单图至少 %s 只，最多 %s 刀"
+          % (min_level, max_level, args.min_nodes, args.max_hits))
+    if relaxed:
+        print("已自动放宽: %s" % relaxed)
+    print()
+
+    if not ranked:
+        print("没有符合条件的怪。放宽 --max-hits / --min-nodes，或调高 --max-level。")
+        return 0
+
+    within_two = [m for m in ranked if m["hits"] <= 2]
+    if within_two:
+        print("== 能一两刀砍死的怪 ==")
+        for m in within_two[:args.top]:
+            print("  %-20s Lv%-4s %s血 %d刀 经验/刀=%.0f 每只经验=%s  %s"
+                  % (m["name"], m["level"], m["hp"], m["hits"],
+                     m["exp_per_hit"], m["exp"], format_maps(m["best_maps"])))
+    else:
+        best = ranked[0]
+        print("== 没有能一两刀砍死的怪（数值结构所致，不是装备问题）==")
+        print("   最快也要 %d 刀（%s）。改用「经验/刀」最高者。" % (best["hits"], best["name"]))
+    print()
+
+    print("== 按经验/刀排序（前 %d 名）==" % min(args.top, len(ranked)))
+    print("  %-20s %5s %8s %5s %9s %8s  %s"
+          % ("怪名", "等级", "血量", "几刀", "经验/刀", "每只经验", "推荐地图"))
+    for m in ranked[:args.top]:
+        print("  %-20s %5s %8s %5s %9.0f %8s  %s"
+              % (m["name"], m["level"], m["hp"], m["hits"],
+                 m["exp_per_hit"], m["exp"], format_maps(m["best_maps"])))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

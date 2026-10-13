@@ -130,6 +130,31 @@ CW RAG 命令行只查询本地 SQLite 快照，不会发起网络请求或上�
 
 ### 能算出精确练级效率或伤害吗？
 
-不能。快照保存的是静态客户端数据，不提供实时掉落、服务器倍率、战斗公式或任务执行结果。回答应以实际检索字段为准；角色属性未知时应说明假设。
+不能从客户端文件直接算出。快照保存的是静态客户端数据，不提供实时掉落、服务器倍率、战斗公式或任务执行结果。
+
+不过练级决策可以做：子 Skill [cw-rag-leveling](skills/cw-rag-leveling/README.md) 按「经验/刀」给怪物排序，选出当前最划算的刷怪目标。它的刀数计算需要你**在游戏里实测的单刀伤害**——客户端文件里没有伤害公式，这个数字推不出来。
+
+## 子 Skill
+
+| 子 Skill | 用途 |
+| --- | --- |
+| [cw-rag-leveling](skills/cw-rag-leveling/README.md) | 按「经验/刀」排出最优练级刷怪路线，附装备与加点建议 |
+
+子 Skill 复用同一个快照，不引入新的数据来源，也不访问网络。
+
+## 运行测试
+
+测试使用 `unittest`，全部基于合成快照，**不需要真实客户端**：
+
+```powershell
+cd "$cwSkillSource"
+py -3 -m unittest discover -s tests -v
+```
+
+只跑练级子 Skill 的测试：
+
+```powershell
+py -3 -m unittest tests.test_cw_leveling -v
+```
 
 英文版 [README.en.md](README.en.md) 包含完整 CLI 参数、分页限制和验收记录。[SKILL.md](SKILL.md) 说明查询行为；[docs/DESIGN.md](docs/DESIGN.md) 记录实现契约；[docs/SOURCE_PROVENANCE.md](docs/SOURCE_PROVENANCE.md) 记录解析器来源和许可。
