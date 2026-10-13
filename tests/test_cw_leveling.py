@@ -201,6 +201,35 @@ class TestHitsNeeded(unittest.TestCase):
         self.assertEqual(cw_calc.hits_needed(None, 10), 1)
         self.assertEqual(cw_calc.hits_needed(0, 10), 1)
 
+    def test_accepts_float_damage(self) -> None:
+        # 减伤折算会产生小数伤害
+        self.assertEqual(cw_calc.hits_needed(100, 43.3), 3)
+
+
+class TestDefenceRule(unittest.TestCase):
+    """减伤规则：effective = damage * 100 / (PDDamage + 100)。
+
+    该规则来自社区指南，标为候选，因此必须可关闭，且零物防时必须是恒等变换。
+    """
+
+    def test_zero_defence_is_identity(self) -> None:
+        self.assertEqual(cw_calc.damage_after_defence(100, 0), 100.0)
+
+    def test_missing_defence_is_identity(self) -> None:
+        self.assertEqual(cw_calc.damage_after_defence(100, None), 100.0)
+
+    def test_defence_30_reduces_to_about_77_percent(self) -> None:
+        self.assertAlmostEqual(cw_calc.damage_after_defence(77, 30), 59.23, places=2)
+
+    def test_defence_100_halves(self) -> None:
+        self.assertAlmostEqual(cw_calc.damage_after_defence(100, 100), 50.0, places=6)
+
+    def test_defence_500_leaves_one_sixth(self) -> None:
+        self.assertAlmostEqual(cw_calc.damage_after_defence(600, 500), 100.0, places=6)
+
+    def test_negative_defence_is_treated_as_zero(self) -> None:
+        self.assertEqual(cw_calc.damage_after_defence(100, -5), 100.0)
+
 
 class TestRanking(LevelingFixture):
     def test_ranks_by_experience_per_hit_descending(self) -> None:
@@ -397,39 +426,74 @@ class TestWebDataExport(LevelingFixture):
         self.assertTrue((target / "gear.js").is_file())
 
 
-class TestMonsterDefenseIsShownNotModelled(LevelingFixture):
-    """物防字段只展示和告警，不参与刀数计算。
+class TestDefenceIsAppliedButSwitched(LevelingFixture):
+    """防御折算默认启用，但可整体关闭；规则来源是候选值。"""
 
-    客户端没有给出物防如何进入伤害公式，所以本工具不编换算。
-    """
+    def test_defence_reduces_hits_are_fewer_without_it(self) -> None:
+        monsters = self.open_snapshot()
+        with_def = cw_calc.rank(monsters, damage=100, min_nodes=1, max_hits=99,
+                                min_level=1, max_level=100, use_defence=True)
+        without = cw_calc.rank(monsters, damage=100, min_nodes=1, max_hits=99,
+                               min_level=1, max_level=100, use_defence=False)
+        by_with = {m["id"]: m for m in with_def}
+        by_without = {m["id"]: m for m in without}
+        # Iron Hog: 500 血, 物防 500 → 折算后每刀 16.7，需要 30 刀；不折算只要 5 刀
+        self.assertLess(by_with["888"]["effective_damage"],
+                        by_without["888"]["effective_damage"])
+        self.assertGreater(by_with["888"]["hits"], by_without["888"]["hits"])
 
-    def test_defense_field_is_read_from_snapshot(self) -> None:
+    def test_zero_defence_monster_is_unaffected(self) -> None:
+        monsters = self.open_snapshot()
+        with_def = {m["id"]: m for m in cw_calc.rank(
+            monsters, 100, 1, 99, 1, 100, use_defence=True)}
+        self.assertEqual(with_def["100"]["effective_damage"], 100.0)
+        self.assertFalse(with_def["100"]["defence_applied"])
+
+    def test_defence_applied_flag_marks_affected_monsters(self) -> None:
+        monsters = self.open_snapshot()
+        ranked = {m["id"]: m for m in cw_calc.rank(
+            monsters, 100, 1, 99, 1, 100, use_defence=True)}
+        self.assertTrue(ranked["888"]["defence_applied"])
+        self.assertTrue(ranked["200"]["defence_applied"])   # Slime 物防 10
+        self.assertFalse(ranked["100"]["defence_applied"])  # Snail 物防 0
+
+    def test_cli_flag_disables_defence(self) -> None:
+        payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 100,
+                                     "--no-defence", "--top", 99,
+                                     "--min-level", 1, "--max-level", 100)
+        self.assertFalse(payload["defence_applied"])
+        for monster in payload["monsters"]:
+            self.assertEqual(monster["effective_damage"], 100.0)
+
+    def test_cli_defence_on_by_default(self) -> None:
+        payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 100,
+                                     "--top", 99, "--min-level", 1, "--max-level", 100)
+        self.assertTrue(payload["defence_applied"])
+
+    def test_defence_note_explains_candidate_status(self) -> None:
+        monsters = self.open_snapshot()
+        ranked = cw_calc.rank(monsters, 100, 1, 99, 1, 100, use_defence=True)
+        note = cw_calc.defence_note(ranked, use_defence=True)
+        self.assertIn("社区指南", note)
+        self.assertIn("--no-defence", note)
+
+    def test_defence_note_when_disabled(self) -> None:
+        monsters = self.open_snapshot()
+        ranked = cw_calc.rank(monsters, 100, 1, 99, 1, 100, use_defence=False)
+        note = cw_calc.defence_note(ranked, use_defence=False)
+        self.assertIn("未应用减伤", note)
+
+    def test_defence_note_reports_all_zero(self) -> None:
+        clean = [{"name": "A", "pdd_raw": 0, "defence_applied": False}]
+        note = cw_calc.defence_note(clean, use_defence=True)
+        self.assertIn("都是 0", note)
+
+
+class TestMonsterDefenceSnapshotFields(LevelingFixture):
+    def test_defence_field_is_read_from_snapshot(self) -> None:
         monsters = {m["id"]: m for m in self.open_snapshot()}
         self.assertEqual(monsters["100"]["pdd_raw"], 0)
         self.assertEqual(monsters["888"]["pdd_raw"], 500)
-
-    def test_hits_ignore_defense(self) -> None:
-        monsters = self.open_snapshot()
-        # Snail: 40 血, 物防 0；Iron Hog: 500 血, 物防 500
-        # 两者刀数都只由血量/伤害决定，物防不参与
-        ranked = cw_calc.rank(monsters, damage=50, min_nodes=1, max_hits=99,
-                              min_level=1, max_level=100)
-        by_id = {m["id"]: m for m in ranked}
-        self.assertIn("100", by_id)
-        self.assertIn("888", by_id)
-        self.assertEqual(by_id["100"]["hits"], 1)   # ceil(40/50)
-        self.assertEqual(by_id["888"]["hits"], 10)  # ceil(500/50)，物防 500 不影响
-
-    def test_defense_note_flags_positive_defense(self) -> None:
-        monsters = self.open_snapshot()
-        note = cw_calc.defense_note(monsters)
-        self.assertIn("物防", note)
-        self.assertIn("Iron Hog", note)
-
-    def test_defense_note_says_clear_when_all_zero(self) -> None:
-        clean = [{"name": "A", "pdd_raw": 0}, {"name": "B", "pdd_raw": None}]
-        note = cw_calc.defense_note(clean)
-        self.assertIn("都是 0", note)
 
     def test_max_pdd_filter_excludes_hard_monsters(self) -> None:
         payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 50,
@@ -439,10 +503,11 @@ class TestMonsterDefenseIsShownNotModelled(LevelingFixture):
             self.assertFalse(monster.get("pdd_raw"),
                              "物防应被过滤为 0，实际=%s" % monster.get("pdd_raw"))
 
-    def test_cli_output_has_defense_column(self) -> None:
+    def test_cli_output_has_defence_columns(self) -> None:
         code, out = self.run_calc("--data-dir", self.data_dir, "--damage", 50)
         self.assertEqual(code, 0)
         self.assertIn("物防", out)
+        self.assertIn("每刀伤害", out)
 
 
 class TestWebCalculatorAssets(unittest.TestCase):
@@ -485,6 +550,21 @@ class TestWebCalculatorAssets(unittest.TestCase):
     def test_calculator_shows_defense_column(self) -> None:
         html = self.html_path.read_text(encoding="utf-8")
         self.assertIn("物防", html)
+
+    def test_calculator_applies_defence_rule(self) -> None:
+        html = self.html_path.read_text(encoding="utf-8")
+        self.assertIn("damageAfterDefence", html)
+        self.assertIn("物防 + 100", html)
+
+    def test_calculator_lets_defence_be_switched_off(self) -> None:
+        html = self.html_path.read_text(encoding="utf-8")
+        self.assertIn('id="usedef"', html)
+        self.assertIn('id="maxpdd"', html)
+
+    def test_calculator_states_the_rule_is_a_candidate(self) -> None:
+        html = self.html_path.read_text(encoding="utf-8")
+        self.assertIn("社区指南", html)
+        self.assertIn("maplestory-classic-server", html)
 
 
 class TestSkillDocumentation(unittest.TestCase):

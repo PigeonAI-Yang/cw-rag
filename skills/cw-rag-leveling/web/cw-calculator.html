@@ -141,6 +141,17 @@
       <label>只打等级不低于自己 −</label>
       <input id="gap" type="number" min="0" max="200" value="15">
     </div>
+    <div>
+      <label>物防上限（0 = 只打无减伤的怪）</label>
+      <input id="maxpdd" type="number" min="0" max="9999" value="9999">
+    </div>
+    <div>
+      <label>减伤折算</label>
+      <label style="display:flex;align-items:center;gap:7px;font-size:14px;color:var(--txt);margin:0;padding:9px 0">
+        <input id="usedef" type="checkbox" checked style="width:auto">
+        按物防折算伤害
+      </label>
+    </div>
     <button id="go">重新计算</button>
   </div>
   <div style="overflow-x:auto">
@@ -148,8 +159,8 @@
       <thead>
         <tr>
           <th>排名</th><th>怪名</th><th class="num">等级</th><th class="num">血量</th>
-          <th class="num">几刀</th><th class="num">经验/刀</th><th class="num">每只经验</th>
-          <th class="num">攻击力</th><th class="num">物防</th><th>推荐地图</th>
+          <th class="num">几刀</th><th class="num">每刀伤害</th><th class="num">经验/刀</th>
+          <th class="num">每只经验</th><th class="num">攻击力</th><th class="num">物防</th><th>推荐地图</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -221,11 +232,17 @@
     游戏文件里<strong>没有伤害计算公式</strong>。之前的版本试过自动估算，结果估出 115 的上限，
     而实测只有 77 —— 高估了 50%。所以现在<strong>取消了估算</strong>，没填就不出结果。<br><br>
 
-    <strong>关于「物防」这一栏：</strong><br>
-    · 物防 = 0 → 实测确认你的面板伤害可以直接套用（红蜗牛物防 0，实测 35-78 与面板 28-77 吻合）<br>
-    · 物防 &gt; 0 → 实际伤害会低于面板，但<strong>客户端没有给出换算方式</strong>，
-      所以本计算器<strong>不推算</strong>，也不把它算进刀数<br>
-    · 表里给物防不为 0 的怪都标出来了，真实刀数会比显示的更多，可以只挑物防 0 的打<br><br>
+    <strong>关于「物防」与减伤：</strong><br>
+    本计算器按这条规则折算伤害：<br>
+    <code style="background:var(--card2);padding:2px 6px;border-radius:4px">实际伤害 = 原始伤害 × 100 ÷ (物防 + 100)</code><br><br>
+    · 物防 0 → 不减伤，等同直接用你的实测值<br>
+    · 物防 30 → 打 77 折　· 物防 100 → 打对折　· 物防 500 → 只剩 1/6<br><br>
+    <strong>这条规则可靠到什么程度：</strong>它来自
+    <a href="https://github.com/mainlandhero/maplestory-classic-server/blob/main/research/meowdb-combat-formulas.md" target="_blank" style="color:var(--blue)">maplestory-classic-server</a>
+    收录的社区指南，标为「候选」而非「已从客户端确认」。该项目的客户端逆向确认了武器倍率表，但防御公式只找到常量池的间接旁证。<br>
+    物防 0 时这条规则是恒等变换，所以它和你目前所有实测都不冲突——但也不构成验证。<br><br>
+    <strong>想确认它：</strong>去打一只物防 30 的黑木桩（Dark Stump）。伤害上限落在 <strong>59</strong> 说明反比例成立，落在 47 说明是减法，还是 77 说明物防无效。<br>
+    在确认之前，可以关掉「按物防折算」，或把「物防上限」设成 0 只打物防 0 的怪。<br><br>
 
     装备掉落率、服务器倍率、活动加成，客户端文件里也没有。
   </div>
@@ -279,16 +296,25 @@ function tagFor(h){
   return `<span class="tag ${cls}">${h} 刀</span>`;
 }
 
-function computeOne(lv, dmg, minNodes, maxLv, minLv){
+function damageAfterDefence(damage, pdd){
+  const d = pdd || 0;
+  if(d <= 0) return damage;
+  return damage * 100 / (d + 100);
+}
+
+function computeOne(lv, dmg, minNodes, maxLv, minLv, useDefence){
   const out = [];
   for(const m of MOBS){
     if(m.level > maxLv || m.level < minLv || m.exp <= 0) continue;
     const maps = m.maps.filter(x => x.count >= minNodes).sort((a,b)=> b.count - a.count);
     if(!maps.length) continue;
-    const hits = Math.max(1, Math.ceil(m.hp / dmg));
-    out.push({ ...m, hits, eph: m.exp / hits, maps });
+    const pdd = useDefence ? m.pdd : 0;
+    const eff = damageAfterDefence(dmg, pdd);
+    const hits = Math.max(1, Math.ceil(m.hp / eff));
+    out.push({ ...m, hits, eff, defenceApplied: useDefence && (m.pdd||0) > 0,
+               eph: m.exp / hits, maps });
   }
-  // 经验/刀相同的，优先物防为 0 的（面板伤害可直接套用）
+  // 经验/刀相同的，优先物防为 0 的（无减伤不确定性）
   out.sort((a,b)=> b.eph - a.eph || (a.pdd||0) - (b.pdd||0));
   return out;
 }
@@ -303,29 +329,36 @@ function compute(){
   const maxHits = +$('maxhits').value;
   const maxLv = +$('maxlv').value || lv + 5;
   const gap = +$('gap').value || 0;
+  const useDefence = $('usedef').checked;
   const minLv = Math.max(1, lv - gap);
 
   // 逐级放宽，保证永远有结果
-  let all = computeOne(lv, dmg, minNodes, maxLv, minLv);
+  let all = computeOne(lv, dmg, minNodes, maxLv, minLv, useDefence);
   let relaxed = null;
   if(!all.length){
-    all = computeOne(lv, dmg, minNodes, maxLv, 1);
+    all = computeOne(lv, dmg, minNodes, maxLv, 1, useDefence);
     relaxed = '已忽略「等级下限」，因为按原条件没有怪符合。';
   }
   if(!all.length){
-    all = computeOne(lv, dmg, 1, maxLv, 1);
+    all = computeOne(lv, dmg, 1, maxLv, 1, useDefence);
     relaxed = '已忽略「地图最少几只怪」，因为没有地图满足密度要求。';
   }
   if(!all.length){
-    all = computeOne(lv, dmg, 1, 999, 1);
+    all = computeOne(lv, dmg, 1, 999, 1, useDefence);
     relaxed = '已忽略「等级上限」，因为原范围内没有怪。';
   }
 
   return {
-    lv, dmg, real, all, relaxed, needsDamage: false,
-    within2: all.filter(x => x.hits <= 2),
-    filtered: all.filter(x => x.hits <= maxHits),
+    lv, dmg, real, all: filterPdd(all), relaxed, needsDamage: false, useDefence,
+    within2: filterPdd(all).filter(x => x.hits <= 2),
+    filtered: filterPdd(all).filter(x => x.hits <= maxHits),
   };
+}
+
+function filterPdd(rows){
+  const cap = +$('maxpdd').value;
+  if(!Number.isFinite(cap) || cap >= 9999) return rows;
+  return rows.filter(x => (x.pdd || 0) <= cap);
 }
 
 function renderVerdict(r){
@@ -393,6 +426,7 @@ function renderTable(r){
       <td class="num">${x.level}</td>
       <td class="num">${x.hp.toLocaleString()}</td>
       <td class="num">${tagFor(x.hits)}</td>
+      <td class="num">${x.eff.toFixed(0)}</td>
       <td class="num"><strong style="color:var(--good)">${x.eph.toFixed(0)}</strong></td>
       <td class="num">${x.exp}</td>
       <td class="num">${x.atk}</td>
@@ -428,15 +462,29 @@ function renderGear(lv){
     '<div style="font-size:12px;color:var(--dim);margin-top:6px">回避 = 怪打空你，直接不掉血。</div>';
 }
 
-function defenseWarning(all){
-  const risky = all.filter(x => (x.pdd || 0) > 0);
-  if(!risky.length) return '';
-  const worst = risky.slice().sort((a,b)=> (b.pdd||0)-(a.pdd||0)).slice(0,4)
-    .map(x=> `${x.name}(物防${x.pdd})`).join('、');
-  return `<div class="warnbox" style="margin-top:12px">
-    <strong>物防提醒：</strong>下列怪的物防字段不为 0，实际伤害会低于面板值 —— ${worst}。<br>
-    该字段为 0 时，你填的面板伤害可直接套用；不为 0 时，客户端没有给出换算方式，
-    <strong>本计算器不推算</strong>，所以这些怪的真实刀数会比表里更多。想避开可以用下面的「物防上限」筛选。
+function defenseWarning(all, useDefence){
+  if(!useDefence){
+    return `<div class="warnbox" style="margin-top:12px">
+      <strong>减伤折算已关闭。</strong>表里的刀数按你给的原始伤害算。
+      若目标物防不是 0，实际需要更多刀。
+    </div>`;
+  }
+  const affected = all.filter(x => (x.pdd || 0) > 0);
+  if(!affected.length){
+    return `<div class="okbox" style="margin-top:12px">
+      本页所有怪的物防都是 0，减伤未生效，等同按原始伤害计算。
+    </div>`;
+  }
+  const worst = affected.slice().sort((a,b)=> a.eff - b.eff).slice(0,4)
+    .map(x=> `${x.name}(物防${x.pdd}→每刀${x.eff.toFixed(0)})`).join('、');
+  return `<div class="note" style="margin-top:12px">
+    <strong>已按「× 100 ÷ (物防+100)」折算伤害</strong>，${affected.length} 只怪受影响 —— ${worst}。<br><br>
+    这个规则来自社区指南（<a href="https://github.com/mainlandhero/maplestory-classic-server/blob/main/research/meowdb-combat-formulas.md" target="_blank" style="color:var(--blue)">maplestory-classic-server 的研究记录</a>），
+    <strong>不是</strong>从客户端二进制确认的。<br>
+    它对物防 0 的怪是恒等变换，所以和你目前的实测并不矛盾——但也不构成验证。<br><br>
+    <strong>想确认它，去打一只物防 30 的黑木桩：</strong>
+    上限落在 59 就成立（77×100÷130），落在 47 则是减法公式，还是 77 就是物防无效。
+    确认前不想冒险，可以勾掉「按物防折算」，或者把「物防上限」设成 0。
   </div>`;
 }
 
@@ -449,21 +497,20 @@ function rerender(){
     <div><div class="k">最高经验/刀</div><div class="v" style="color:var(--good)">${r.all[0]?r.all[0].eph.toFixed(0):'—'}</div></div>`;
 
   $('dmgnote').innerHTML = r.real
-    ? `<div class="okbox">正在用<strong>你实测的伤害 ${r.dmg}</strong>，结果按这个算。</div>`
+    ? `<div class="okbox">正在用<strong>你实测的伤害 ${r.dmg}</strong>${r.useDefence ? '，并按物防折算' : '，未折算物防'}。</div>`
     : `<div class="note">还没填单刀伤害。客户端没有伤害公式，本计算器<strong>不做估算</strong>，请填实测值。</div>`;
 
   renderVerdict(r);
   renderTable(r);
   renderGear(r.lv);
-  const warn = document.getElementById('pddwarn');
-  warn.innerHTML = r.real ? defenseWarning(r.all) : '';
+  document.getElementById('pddwarn').innerHTML = r.real ? defenseWarning(r.all, r.useDefence) : '';
 }
 
 fillWeapons();
 $('weapon').value = pickWeapon(+$('lv').value || 30);
 $('maxlv').value = (+$('lv').value || 30) + 5;
 $('go').addEventListener('click', rerender);
-['lv','str','dex','weapon','watk','dmg','minnodes','maxhits','maxlv','gap'].forEach(id=>{
+['lv','str','dex','weapon','watk','dmg','minnodes','maxhits','maxlv','gap','maxpdd','usedef'].forEach(id=>{
   $(id).addEventListener('change', ()=>{
     if(id === 'lv'){
       const lv = +$('lv').value || 30;

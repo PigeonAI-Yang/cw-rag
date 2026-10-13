@@ -2,11 +2,23 @@
 """Rank Classic World monsters for a normal-attack leveling route.
 
 Reads a CW RAG snapshot (catalog.sqlite) read-only and ranks monsters by
-"experience per hit": exp / ceil(hp / damage).
+"experience per hit": exp / ceil(hp / damage_after_defence).
 
 The player's damage is NOT present in the client files, so --damage is required.
 There is deliberately no fallback estimate: a guessed damage value silently
 produces a wrong ranking, and this tool refuses to do that.
+
+Monster defence is applied with the inverse-proportional rule used by this
+client:
+
+    effective = damage * 100 / (PDDamage + 100)
+
+so PDDamage 100 halves the hit and PDDamage 500 leaves a sixth of it. This rule
+comes from the meowdb community guide captured in the maplestory-classic-server
+research notes, NOT from a client listing, so it is labelled as a candidate and
+can be switched off with --no-defence. A zero PDDamage makes the rule an
+identity, which is why it is consistent with every zero-defence measurement so
+far - that agreement does not confirm the rule.
 
 Client files stay read-only. This tool only reads the saved snapshot.
 """
@@ -22,6 +34,7 @@ from pathlib import Path
 DATABASE_NAME = "catalog.sqlite"
 MAX_STATIC_LEVEL = 110
 SKIPPED_NAME_MARKERS = ("Test(", "Super ", "Ultra ")
+DEFENCE_SCALE = 100.0
 
 
 def connect(data_dir: Path) -> sqlite3.Connection:
@@ -110,14 +123,30 @@ def load_monsters(connection: sqlite3.Connection) -> list[dict]:
     return monsters
 
 
-def hits_needed(hp: int | None, damage: int) -> int:
+def damage_after_defence(damage: float, pdd: int | None) -> float:
+    """按 CW 的反比例减伤规则折算实际伤害。
+
+    effective = damage * 100 / (PDDamage + 100)
+
+    PDDamage 为 0 或缺失时是恒等变换。规则本身是候选值（来自社区指南，
+    不是客户端清单），所以调用方可关闭。
+    """
+    pdd_value = pdd or 0
+    if pdd_value <= 0:
+        return float(damage)
+    return damage * DEFENCE_SCALE / (pdd_value + DEFENCE_SCALE)
+
+
+def hits_needed(hp: int | None, damage: float) -> int:
     if not hp or hp <= 0:
         return 1
+    if damage <= 0:
+        return hp
     return max(1, math.ceil(hp / damage))
 
 
 def rank(monsters: list[dict], damage: int, min_nodes: int, max_hits: int,
-         min_level: int, max_level: int) -> list[dict]:
+         min_level: int, max_level: int, use_defence: bool = True) -> list[dict]:
     ranked = []
     for monster in monsters:
         if monster["level"] > max_level or monster["level"] < min_level:
@@ -127,28 +156,34 @@ def rank(monsters: list[dict], damage: int, min_nodes: int, max_hits: int,
         maps = [m for m in monster["maps"] if m["count"] >= min_nodes]
         if not maps:
             continue
-        hits = hits_needed(monster["hp"], damage)
+
+        pdd = monster.get("pdd_raw") if use_defence else None
+        effective = damage_after_defence(damage, pdd)
+        hits = hits_needed(monster["hp"], effective)
         if hits > max_hits:
             continue
         ranked.append({
             **monster,
+            "effective_damage": round(effective, 2),
+            "defence_applied": bool(use_defence and (pdd or 0) > 0),
             "hits": hits,
             "exp_per_hit": monster["exp"] / hits,
             "best_maps": sorted(maps, key=lambda m: (-m["count"], m["name"])),
         })
-    # 经验/刀相同的，优先选物防为 0 的（面板值可直接套用，风险最低）
+    # 经验/刀相同的，优先选物防为 0 的（无减伤不确定性，风险最低）
     ranked.sort(key=lambda m: (-m["exp_per_hit"], m.get("pdd_raw") or 0,
                                m["level"], m["name"]))
     return ranked
 
 
 def rank_with_fallback(monsters: list[dict], damage: int, min_nodes: int,
-                       max_hits: int, min_level: int, max_level: int) -> tuple[list[dict], str | None]:
+                       max_hits: int, min_level: int, max_level: int,
+                       use_defence: bool = True) -> tuple[list[dict], str | None]:
     """排序；若条件过严导致空结果，逐级放宽并返回放宽说明。
 
     放宽顺序：最多几刀 → 地图密度 → 等级上限。永不返回空列表（除非快照本身没有怪）。
     """
-    ranked = rank(monsters, damage, min_nodes, max_hits, min_level, max_level)
+    ranked = rank(monsters, damage, min_nodes, max_hits, min_level, max_level, use_defence)
     if ranked:
         return ranked, None
 
@@ -158,14 +193,14 @@ def rank_with_fallback(monsters: list[dict], damage: int, min_nodes: int,
         (1, 999, "已忽略全部筛选，仅按等级范围"),
     ]
     for nodes, hits, note in attempts:
-        ranked = rank(monsters, damage, nodes, hits, min_level, max_level)
+        ranked = rank(monsters, damage, nodes, hits, min_level, max_level, use_defence)
         if ranked:
             return ranked, note
 
-    ranked = rank(monsters, damage, 1, 999, 1, max_level)
+    ranked = rank(monsters, damage, 1, 999, 1, max_level, use_defence)
     if ranked:
         return ranked, "已忽略「等级下限」，因为该范围内没有怪"
-    ranked = rank(monsters, damage, 1, 999, 1, MAX_STATIC_LEVEL)
+    ranked = rank(monsters, damage, 1, 999, 1, MAX_STATIC_LEVEL, use_defence)
     if ranked:
         return ranked, "已忽略「等级上限」，因为原范围内没有怪"
     return ranked, None
@@ -175,16 +210,20 @@ def format_maps(maps: list[dict], limit: int = 2) -> str:
     return "、".join("%s×%d" % (m["name"], m["count"]) for m in maps[:limit])
 
 
-def defense_note(monsters: list[dict]) -> str:
-    """根据原始 PDDamage 字段给一句可操作提醒，不推算伤害。"""
-    risky = [m for m in monsters if (m["pdd_raw"] or 0) > 0]
-    if not risky:
-        return "本页所有怪的物防字段都是 0，面板伤害可直接套用。"
-    worst = sorted(risky, key=lambda m: -(m["pdd_raw"] or 0))[:4]
-    listed = "、".join("%s(物防%s)" % (m["name"], m["pdd_raw"]) for m in worst)
-    return ("注意：%d 只怪的物防字段不为 0（如 %s）。该字段为 0 时面板伤害直接生效；"
-            "不为 0 时实际伤害会低于面板，客户端未提供换算方式，本工具不推算。"
-            % (len(risky), listed))
+def defence_note(monsters: list[dict], use_defence: bool) -> str:
+    """说明防御规则是否启用，以及列表里有无受它影响的怪。"""
+    if not use_defence:
+        return ("未应用减伤：刀数按你给的原始伤害算。若目标物防不是 0，"
+                "实际需要更多刀。")
+    affected = [m for m in monsters if m.get("defence_applied")]
+    if not affected:
+        return "本页所有怪的物防字段都是 0，减伤未生效，等同按原始伤害计算。"
+    worst = sorted(affected, key=lambda m: m["effective_damage"])[:4]
+    listed = "、".join("%s(物防%s→每刀%.0f)" % (m["name"], m["pdd_raw"], m["effective_damage"])
+                      for m in worst)
+    return ("已按「× 100 ÷ (物防+100)」折算：%d 只怪受影响（如 %s）。"
+            "该规则来自社区指南而非客户端清单，可用 --no-defence 关闭或按下表实测校验。"
+            % (len(affected), listed))
 
 
 def main() -> int:
@@ -207,7 +246,9 @@ def main() -> int:
     parser.add_argument("--atk-cap", type=int, default=None,
                         help="只考虑攻击力不高于此值的怪（更安全）")
     parser.add_argument("--max-pdd", type=int, default=None,
-                        help="只考虑物防字段不高于此值的怪（避开打不动的）")
+                        help="只考虑物防字段不高于此值的怪（--max-pdd 0 即只打无减伤的）")
+    parser.add_argument("--no-defence", action="store_true",
+                        help="关闭减伤折算，刀数按原始伤害计算")
     parser.add_argument("--top", type=int, default=15)
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     args = parser.parse_args()
@@ -229,7 +270,8 @@ def main() -> int:
         connection.close()
 
     ranked, relaxed = rank_with_fallback(
-        monsters, damage, args.min_nodes, args.max_hits, min_level, max_level)
+        monsters, damage, args.min_nodes, args.max_hits, min_level, max_level,
+        use_defence=not args.no_defence)
     if args.atk_cap is not None:
         ranked = [m for m in ranked if (m["atk"] or 0) <= args.atk_cap]
     if args.max_pdd is not None:
@@ -240,6 +282,7 @@ def main() -> int:
             "snapshot": summary,
             "damage": damage,
             "damage_source": "玩家实测 %d" % damage,
+            "defence_applied": not args.no_defence,
             "filters": {
                 "min_level": min_level,
                 "max_level": max_level,
@@ -257,7 +300,8 @@ def main() -> int:
     print("快照: %s / %s / schema %s（构建于 %s）"
           % (summary.get("edition"), summary.get("region"),
              summary.get("schema_version"), summary.get("built_at")))
-    print("单刀伤害: 玩家实测 %d" % damage)
+    print("单刀伤害: 玩家实测 %d%s"
+          % (damage, "（已按物防折算）" if not args.no_defence else "（未折算物防）"))
     print("筛选: 等级 %s–%s，单图至少 %s 只，最多 %s 刀"
           % (min_level, max_level, args.min_nodes, args.max_hits))
     if relaxed:
@@ -282,16 +326,16 @@ def main() -> int:
     print()
 
     print("== 按经验/刀排序（前 %d 名）==" % min(args.top, len(ranked)))
-    print("  %-20s %5s %8s %5s %9s %8s %6s  %s"
-          % ("怪名", "等级", "血量", "几刀", "经验/刀", "每只经验", "物防", "推荐地图"))
+    print("  %-20s %5s %8s %5s %7s %9s %8s %6s  %s"
+          % ("怪名", "等级", "血量", "几刀", "每刀伤害", "经验/刀", "每只经验", "物防", "推荐地图"))
     for m in ranked[:args.top]:
         pdd = m["pdd_raw"]
-        print("  %-20s %5s %8s %5s %9.0f %8s %6s  %s"
-              % (m["name"], m["level"], m["hp"], m["hits"],
+        print("  %-20s %5s %8s %5s %7.1f %9.0f %8s %6s  %s"
+              % (m["name"], m["level"], m["hp"], m["hits"], m["effective_damage"],
                  m["exp_per_hit"], m["exp"], "—" if pdd is None else pdd,
                  format_maps(m["best_maps"])))
     print()
-    print(defense_note(ranked[:args.top]))
+    print(defence_note(ranked[:args.top], use_defence=not args.no_defence))
     return 0
 
 
