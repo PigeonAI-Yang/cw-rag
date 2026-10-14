@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -27,8 +28,14 @@ def load_module(path: Path, name: str):
     return module
 
 
-# cw_calc.py 用连字符以外的合法模块名加载，避免与 scripts/ 下其它模块重名
-cw_calc = load_module(LEVELING_ROOT / "scripts" / "cw_calc.py", "cw_calc_module")
+# cw_calc.py 与 cw_attack_speed.py 同目录；先把该目录加入 sys.path，
+# 让 cw_calc 的 `from cw_attack_speed import ...` 能解析。
+SKILL_SCRIPTS = LEVELING_ROOT / "scripts"
+if str(SKILL_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SKILL_SCRIPTS))
+
+cw_calc = load_module(SKILL_SCRIPTS / "cw_calc.py", "cw_calc_module")
+cw_attack_speed = load_module(SKILL_SCRIPTS / "cw_attack_speed.py", "cw_attack_speed_module")
 export_web_data = load_module(EXPORT_SCRIPT, "export_web_data_module")
 
 
@@ -185,6 +192,137 @@ class LevelingFixture(unittest.TestCase):
         code, out = self.run_calc(*args, "--json")
         self.assertEqual(code, 0)
         return json.loads(out)
+
+
+class TestAttackSpeed(unittest.TestCase):
+    """攻击间隔由客户端帧延迟算得。
+
+    帧延迟是从客户端读出的（见 read_client_frames.py），缩放规则来自社区指南，
+    标为候选——所以这里同时钉住算术和两个锚点。
+    """
+
+    def test_frame_delays_match_the_documented_client_values(self) -> None:
+        # 这些值由 read_client_frames.py 从客户端读出并与官方逆向记录一致
+        self.assertEqual(cw_attack_speed.FRAME_DELAYS["swingO1"], [300, 150, 350])
+        self.assertEqual(cw_attack_speed.FRAME_DELAYS["stabO1"], [350, 450])
+        self.assertEqual(cw_attack_speed.FRAME_DELAYS["swingP1"], [300, 150, 350])
+        self.assertEqual(cw_attack_speed.FRAME_DELAYS["stabT1"], [300, 100, 350])
+
+    def test_speed_tag_6_leaves_the_raw_total_unchanged(self) -> None:
+        # 锚点：(10 + 6) / 16 == 1，所以攻速 6 时每帧缩放是恒等变换。
+        # 注意 action_ms 还要做 30ms 外层取整，所以这里验证的是「未取整的
+        # native 总和」与原始帧总和相等，而不是最终返回值。
+        for action, frames in cw_attack_speed.FRAME_DELAYS.items():
+            native = sum(math.trunc(frame * (10 + 6) / 16) for frame in frames)
+            self.assertEqual(native, sum(frames),
+                             "%s 在攻速 6 时的帧缩放应为恒等" % action)
+
+    def test_polearm_at_tag_8_is_900ms(self) -> None:
+        # 锚点：指南的算例（长柄挥砍 300/150/350，攻速 8 → 900 ms）
+        self.assertEqual(cw_attack_speed.action_ms("swingP1", 8), 900)
+
+    def test_one_handed_sword_at_tag_4_is_720ms(self) -> None:
+        self.assertEqual(cw_attack_speed.action_ms("swingO1", 4), 720)
+
+    def test_faster_tag_never_takes_longer(self) -> None:
+        previous = None
+        for tag in range(2, 9):
+            current = cw_attack_speed.action_ms("swingO1", tag)
+            if previous is not None:
+                self.assertLessEqual(previous, current,
+                                     "攻速标签 %d 不该比 %d 更慢" % (tag, tag - 1))
+            previous = current
+
+    def test_out_of_range_tag_returns_none(self) -> None:
+        self.assertIsNone(cw_attack_speed.action_ms("swingO1", 1))
+        self.assertIsNone(cw_attack_speed.action_ms("swingO1", 9))
+        self.assertIsNone(cw_attack_speed.action_ms("swingO1", None))
+
+    def test_unknown_action_returns_none(self) -> None:
+        self.assertIsNone(cw_attack_speed.action_ms("notAnAction", 4))
+
+    def test_item_id_maps_to_family(self) -> None:
+        self.assertEqual(cw_attack_speed.family_for_item_id("1302018"), "1h-sword")
+        self.assertEqual(cw_attack_speed.family_for_item_id("1312009"), "1h-axe")
+        self.assertEqual(cw_attack_speed.family_for_item_id("1432006"), "spear")
+        self.assertEqual(cw_attack_speed.family_for_item_id("1442007"), "polearm")
+        self.assertIsNone(cw_attack_speed.family_for_item_id("2070000"))  # 飞镖不是近战
+
+    def test_blended_interval_uses_the_60_40_mix(self) -> None:
+        result = cw_attack_speed.family_ms("1h-sword", 4)
+        self.assertIsNotNone(result)
+        swing, stab, blended = result
+        self.assertAlmostEqual(blended, 0.6 * swing + 0.4 * stab, places=6)
+
+    def test_sword_and_axe_share_the_same_timing(self) -> None:
+        # 两者动作集相同，攻速相同则间隔相同；差别只在倍率
+        self.assertEqual(cw_attack_speed.attack_interval_ms("1302018", 4),
+                         cw_attack_speed.attack_interval_ms("1312009", 4))
+
+    def test_attacks_per_second_is_consistent(self) -> None:
+        interval = cw_attack_speed.attack_interval_ms("1302018", 4)
+        rate = cw_attack_speed.attacks_per_second("1302018", 4)
+        self.assertAlmostEqual(rate, 1000.0 / interval, places=6)
+
+
+class TestSecondsAndRateRanking(LevelingFixture):
+    """给了武器与攻速后，按每秒经验排序。"""
+
+    def test_seconds_and_rate_present_when_speed_given(self) -> None:
+        payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 100,
+                                     "--weapon", "1302018", "--speed-tag", 4,
+                                     "--top", 99, "--min-level", 1, "--max-level", 100)
+        self.assertEqual(payload["attack_interval_ms"], 720.0)
+        for monster in payload["monsters"]:
+            self.assertIn("seconds_per_kill", monster)
+            self.assertIn("exp_per_second", monster)
+            # 720ms/刀
+            self.assertAlmostEqual(monster["seconds_per_kill"],
+                                   monster["hits"] * 0.72, places=2)
+
+    def test_rate_ranking_is_descending(self) -> None:
+        payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 100,
+                                     "--weapon", "1302018", "--speed-tag", 4,
+                                     "--top", 99, "--min-level", 1, "--max-level", 100)
+        rates = [m["exp_per_second"] for m in payload["monsters"]]
+        self.assertEqual(rates, sorted(rates, reverse=True))
+
+    def test_without_speed_numbers_are_absent(self) -> None:
+        payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 100,
+                                     "--top", 99, "--min-level", 1, "--max-level", 100)
+        self.assertIsNone(payload["attack_interval_ms"])
+        for monster in payload["monsters"]:
+            self.assertNotIn("seconds_per_kill", monster)
+
+    def test_max_seconds_filter(self) -> None:
+        payload = self.run_calc_json("--data-dir", self.data_dir, "--damage", 100,
+                                     "--weapon", "1302018", "--speed-tag", 4,
+                                     "--max-seconds", 1, "--top", 99,
+                                     "--min-level", 1, "--max-level", 100)
+        for monster in payload["monsters"]:
+            self.assertLessEqual(monster["seconds_per_kill"], 1)
+
+    def test_faster_weapon_yields_higher_rate(self) -> None:
+        slow = self.run_calc_json("--data-dir", self.data_dir, "--damage", 100,
+                                  "--weapon", "1302018", "--speed-tag", 8,
+                                  "--top", 99, "--min-level", 1, "--max-level", 100)
+        fast = self.run_calc_json("--data-dir", self.data_dir, "--damage", 100,
+                                  "--weapon", "1302018", "--speed-tag", 4,
+                                  "--top", 99, "--min-level", 1, "--max-level", 100)
+        self.assertGreater(fast["monsters"][0]["exp_per_second"],
+                           slow["monsters"][0]["exp_per_second"])
+
+    def test_weapon_and_speed_tag_must_come_together(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_calc("--data-dir", self.data_dir, "--damage", 100,
+                          "--weapon", "1302018")
+        with self.assertRaises(SystemExit):
+            self.run_calc("--data-dir", self.data_dir, "--damage", 100, "--speed-tag", 4)
+
+    def test_non_melee_weapon_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_calc("--data-dir", self.data_dir, "--damage", 100,
+                          "--weapon", "2070000", "--speed-tag", 4)
 
 
 class TestHitsNeeded(unittest.TestCase):
@@ -574,10 +712,20 @@ class TestSkillDocumentation(unittest.TestCase):
         self.assertIn("name: cw-rag-leveling", text)
         self.assertIn("description:", text)
 
-    def test_child_skill_states_the_damage_limit(self) -> None:
+    def test_child_skill_forbids_estimating_damage(self) -> None:
         text = (LEVELING_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("没有伤害计算公式", text)
-        self.assertIn("必填", text)
+        self.assertIn("不许估算", text)
+        self.assertIn("客户端没有伤害公式", text)
+
+    def test_child_skill_requires_extracted_attack_speed(self) -> None:
+        text = (LEVELING_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("cw_attack_speed.py", text)
+        self.assertIn("不许按速度标签猜百分比", text)
+
+    def test_child_skill_grades_its_sources(self) -> None:
+        text = (LEVELING_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("从客户端读出", text)
+        self.assertIn("候选", text)
 
     def test_parent_skill_links_to_child(self) -> None:
         text = (REPOSITORY_ROOT / "SKILL.md").read_text(encoding="utf-8")

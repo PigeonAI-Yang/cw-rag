@@ -16,6 +16,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
+# 同目录的攻速模块，提供由客户端帧延迟算出的挥刀时间
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cw_attack_speed import attack_interval_ms  # noqa: E402
+
 DATABASE_NAME = "catalog.sqlite"
 MAX_STATIC_LEVEL = 110
 SKIPPED_NAME_MARKERS = ("Test(", "Super ", "Ultra ")
@@ -111,14 +115,18 @@ def build_gear(connection: sqlite3.Connection) -> dict:
 
         if (family == "Weapon" and row["req_job"] == WARRIOR_REQ_JOB
                 and level and level <= MAX_GEAR_LEVEL):
+            speed = info.get("attackSpeed")
             weapons.append({
                 "id": row["normalized_id"],
                 "name": row["name"],
                 "lv": level,
                 "atk": info.get("incWAT") or info.get("incPAD") or 0,
-                "spd": info.get("attackSpeed"),
+                "spd": speed,
                 "str": info.get("reqSTR"),
                 "two": info.get("islot") == "WpSi",
+                # 挥刀时间由客户端帧延迟算得；见 cw_attack_speed.py
+                "ms": attack_interval_ms(row["normalized_id"], speed)
+                if isinstance(speed, int) else None,
             })
         elif family == "Shield" and level is not None and level <= MAX_GEAR_LEVEL:
             shields.append({
