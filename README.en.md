@@ -1,6 +1,6 @@
 # CW RAG: local MapleStory Classic World data for Codex
 
-[简体中文](README.md) | English
+[简体中文](README.md) | English　·　Version 1.0.0　·　[Changelog](CHANGELOG.en.md)
 
 ![CW RAG helps MapleStory Classic World players query local client data about equipment, maps, skills, and quests.](assets/cw-rag-hero.png)
 
@@ -162,17 +162,19 @@ Yes. The Skill can rewrite likely Chinese names or concepts as English source te
 
 ### Does it calculate exact leveling efficiency or damage?
 
-Damage itself cannot be derived from the client files. The snapshot contains static client data; it does not provide live drops, server rates, combat formulas, or quest execution.
+Damage itself cannot be derived from the client files. The snapshot contains static client data; it does not provide live drops, server rates, combat formulas, or quest execution, so **the per-hit damage must be measured in game**.
 
-A leveling decision can still be made. The child skill [cw-rag-leveling](skills/cw-rag-leveling/README.md) ranks monsters by experience per hit to pick the best current hunting target. Its hit count needs the damage you **measured in game** - the client files contain no damage formula, so that number cannot be derived.
+A leveling decision can still be made, and it is expressed in time rather than hit counts. The child skill [cw-rag-leveling](skills/cw-rag-leveling/README.md) uses **attack intervals extracted from the client** (speed 4 is about 720 ms, speed 8 about 900 ms), turns "how many hits" into "how many seconds", and ranks monsters by **experience per second**.
 
 ## Child skills
 
 | Child skill | Purpose |
 | --- | --- |
-| [cw-rag-leveling](skills/cw-rag-leveling/README.md) | Ranks monsters by experience per hit for a leveling route, with gear and skill-point advice |
+| [cw-rag-leveling](skills/cw-rag-leveling/README.md) | Ranks monsters by experience per second for a leveling route, with weapon timing, attack speed and skill-point advice |
 
-Child skills reuse the same snapshot, add no new data source, and make no network requests.
+Child skills reuse the same snapshot and additionally read the client's attack frame delays to compute swing time. They make no network requests and never write to the client.
+
+Every input a child skill uses is graded in its documentation: **read from the client** (monster stats, frame delays, weapon multipliers), **candidate** (the frame-delay scaling rule and the defence rule, both from a community guide rather than a client listing), **measured** (the player's reported per-hit damage), or **absent** (drop rates, server rates, event bonuses).
 
 ## Running the tests
 
